@@ -17,7 +17,7 @@ from app.api.chat import router as chat_router
 from app.api.health import readiness_probes
 from app.api.health import router as health_router
 from app.api.threads import router as threads_router
-from app.cache.embeddings import get_embedder, init_embedder
+from app.cache.embeddings import dispose_embedder, get_embedder, init_embedder
 from app.config import get_settings
 from app.db.analytics import dispose_analytics, get_analytics, init_analytics
 from app.db.postgres import dispose_engine, init_engine, postgres_ready
@@ -57,9 +57,9 @@ def _materialize_ssh_key(settings) -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan hook.
 
-    Initializes the Postgres connection pool on startup and registers its
-    readiness probe. Later phases will add the MySQL/SSH tunnel manager and
-    the sentence-transformers embedder here, tearing them down on shutdown.
+    Initializes the Postgres connection pool and the MySQL/SSH tunnel manager
+    on startup, registers their readiness probes, and warms up the Cloudflare-API
+    embedder — tearing them all down on shutdown.
     """
     settings = get_settings()
     _materialize_ssh_key(settings)
@@ -80,6 +80,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await stop_sweeper(app)
     await dispose_engine()
     dispose_analytics()
+    await dispose_embedder()
 
 
 def create_app() -> FastAPI:

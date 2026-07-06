@@ -22,7 +22,6 @@ dependencies = [
     "sqlglot>=25",
     "anthropic",
     "httpx",
-    "sentence-transformers",
     "pyjwt",
     "bcrypt",
     "pydantic-settings",

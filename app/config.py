@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     cloudflare_account_id: str = ""
     cloudflare_api_token: str = ""
     cloudflare_model: str = "@cf/meta/llama-3.1-8b-instruct"
+    # Embeddings run via the Cloudflare API (same BGE model, no local download).
+    cloudflare_embedding_model: str = "@cf/baai/bge-small-en-v1.5"
 
     # MySQL analytics
     mysql_host: str = "127.0.0.1"
@@ -73,7 +75,6 @@ class Settings(BaseSettings):
     result_cache_ttl_s: int = 300
     result_cache_sweep_interval_s: int = 300
     sql_row_cap: int = 50
-    embedding_model: str = "BAAI/bge-small-en-v1.5"
 
     # CORS
     cors_origins: list[str] = ["http://localhost:3000"]

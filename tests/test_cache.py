@@ -11,16 +11,20 @@ fixture.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 import sqlglot
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.cache.embeddings import Embedder
+from app.errors import UpstreamLLMError
 from app.cache.normalizer import extract_temporal_intent, normalize_question
 from app.cache.results import ResultCache, jsonable_rows, result_cache_key
 from app.cache.semantic import QueryCache
@@ -187,46 +191,55 @@ def test_bind_template_never_raises_on_garbage_input():
 # ============================================================
 
 
-class _FakeModel:
-    def __init__(self):
-        self.encode_calls = 0
+def _cf_settings():
+    return SimpleNamespace(
+        cloudflare_account_id="acc",
+        cloudflare_api_token="tok",
+        cloudflare_embedding_model="@cf/baai/bge-small-en-v1.5",
+    )
 
-    def encode(self, text, normalize_embeddings=True):
-        self.encode_calls += 1
-        return [0.1, 0.2, 0.3]
+
+def _mock_embed_client(handler):
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-async def test_embedder_encode_returns_fake_vector():
-    fake_model = _FakeModel()
-    embedder = Embedder("fake-model", model_loader=lambda _name: fake_model)
+async def test_embedder_encode_calls_cloudflare_and_normalizes():
+    seen = {}
 
+    def handler(request):
+        seen["path"] = request.url.path
+        seen["auth"] = request.headers.get("Authorization")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, json={"result": {"shape": [1, 3], "data": [[3.0, 0.0, 4.0]]}, "success": True}
+        )
+
+    embedder = Embedder(_cf_settings(), client=_mock_embed_client(handler))
     vector = await embedder.encode("sales today")
 
-    assert vector == [0.1, 0.2, 0.3]
+    assert vector == [0.6, 0.0, 0.8]  # L2-normalized [3, 0, 4]
     assert all(isinstance(x, float) for x in vector)
+    assert seen["path"].endswith("@cf/baai/bge-small-en-v1.5")
+    assert seen["auth"] == "Bearer tok"
+    assert seen["body"] == {"text": "sales today"}
 
 
-async def test_embedder_loader_called_exactly_once():
-    calls = []
+async def test_embedder_encode_raises_on_api_failure():
+    def handler(request):
+        return httpx.Response(200, json={"success": False, "errors": ["boom"]})
 
-    def loader(name):
-        calls.append(name)
-        return _FakeModel()
-
-    embedder = Embedder("fake-model", model_loader=loader)
-    await embedder.encode("first")
-    await embedder.encode("second")
-
-    assert len(calls) == 1
+    embedder = Embedder(_cf_settings(), client=_mock_embed_client(handler))
+    with pytest.raises(UpstreamLLMError):
+        await embedder.encode("x")
 
 
-async def test_embedder_warmup_uses_anyio_thread_path():
-    fake_model = _FakeModel()
-    embedder = Embedder("fake-model", model_loader=lambda _name: fake_model)
+async def test_embedder_warmup_never_raises():
+    def handler(request):
+        return httpx.Response(503)
 
+    embedder = Embedder(_cf_settings(), client=_mock_embed_client(handler))
+    # warmup must swallow failures so a bad embeddings config never blocks startup
     await embedder.warmup()
-
-    assert fake_model.encode_calls == 1
 
 
 # ============================================================

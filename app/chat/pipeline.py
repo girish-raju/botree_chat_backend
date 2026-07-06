@@ -183,11 +183,17 @@ class ChatPipeline:
                 cache_level = "L0"
                 from_cache = True
             else:
-                # 6. L1 semantic cache.
-                question_embedding = await self.embedder.encode(rewritten)
-                hit = await self.query_cache.lookup_semantic(
-                    session, question_embedding, temporal, self.settings.semantic_threshold
-                )
+                # 6. L1 semantic cache (best-effort: if the embeddings API or the
+                # lookup fails, treat it as a miss and fall through to the LLM
+                # rather than failing the whole request).
+                hit = None
+                try:
+                    question_embedding = await self.embedder.encode(rewritten)
+                    hit = await self.query_cache.lookup_semantic(
+                        session, question_embedding, temporal, self.settings.semantic_threshold
+                    )
+                except Exception:
+                    logger.warning("semantic_cache_lookup_failed", exc_info=True)
                 if hit is not None:
                     sem_entry, _similarity = hit
                     template = sem_entry.sql_template

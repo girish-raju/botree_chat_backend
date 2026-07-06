@@ -1,81 +1,119 @@
-"""Sentence-embedding provider for the semantic query cache.
+"""Text-embedding provider for the semantic query cache.
 
-`Embedder` lazy-loads the `sentence_transformers` model on first use, so
-importing this module (or the whole `app.cache` package) never pulls a
-multi-hundred-MB model download into a request path, a test run, or a cold
-import. `sentence_transformers` itself is imported *inside* the loader method
-for the same reason.
+Embeddings are produced by the Cloudflare Workers AI embeddings API
+(`@cf/baai/bge-small-en-v1.5` by default) rather than a locally-downloaded
+model, so no multi-hundred-MB model — and no `torch` — is ever installed on the
+server. It's the same small BGE model, just called as an API, consistent with
+how the LLM is used.
 
-Module-level `init_embedder` / `get_embedder` mirror `app.db.postgres`'s
-engine singleton pattern. `warmup()` is meant to be called once from the
-FastAPI lifespan (wired up elsewhere, not by this module) so the first real
-request doesn't pay the model-load latency.
+Module-level `init_embedder` / `get_embedder` mirror `app.db.postgres`'s engine
+singleton pattern. `warmup()` is called once from the FastAPI lifespan so a
+misconfigured embeddings API surfaces in the logs before the first request.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
-import anyio
+import httpx
 import structlog
+
+from app.config import Settings
+from app.errors import UpstreamLLMError
 
 logger = structlog.get_logger(__name__)
 
-#: Signature of a model loader: takes the model name, returns an object with
-#: an `.encode(text, normalize_embeddings=bool) -> array-like` method (the
-#: `SentenceTransformer` API). Injectable for tests.
-ModelLoader = Callable[[str], Any]
+_BASE_URL = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
 
 
-def _default_model_loader(model_name: str) -> Any:
-    from sentence_transformers import SentenceTransformer  # noqa: PLC0415
-
-    return SentenceTransformer(model_name)
+def _l2_normalize(vector: list[float]) -> list[float]:
+    """Scale `vector` to unit length (no-op for an all-zero or already-unit vector)."""
+    norm = sum(x * x for x in vector) ** 0.5
+    if norm == 0.0:
+        return vector
+    return [x / norm for x in vector]
 
 
 class Embedder:
-    """Lazily-loaded sentence embedder.
+    """Text embedder backed by the Cloudflare Workers AI embeddings API.
 
-    The underlying model is loaded at most once, on the first call to
-    `encode`, via `model_loader` (defaults to loading a real
-    `SentenceTransformer`). Pass a fake `model_loader` in tests to avoid any
-    network/disk access.
+    `encode` returns an L2-normalized embedding for a piece of text. An
+    `httpx.AsyncClient` may be injected (e.g. in tests) to avoid real network
+    calls; otherwise one is created and owned by this instance.
     """
 
-    def __init__(self, model_name: str, model_loader: ModelLoader | None = None) -> None:
-        self._model_name = model_name
-        self._model_loader = model_loader or _default_model_loader
-        self._model: Any | None = None
+    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+        self._settings = settings
+        self._client = client or httpx.AsyncClient(timeout=30.0)
+        self._own_client = client is None
 
-    def _ensure_loaded(self) -> Any:
-        if self._model is None:
-            logger.info("embedding_model_loading", model=self._model_name)
-            self._model = self._model_loader(self._model_name)
-            logger.info("embedding_model_loaded", model=self._model_name)
-        return self._model
+    @property
+    def _url(self) -> str:
+        return _BASE_URL.format(
+            account_id=self._settings.cloudflare_account_id,
+            model=self._settings.cloudflare_embedding_model,
+        )
 
-    def _encode_sync(self, text: str) -> list[float]:
-        model = self._ensure_loaded()
-        vector = model.encode(text, normalize_embeddings=True)
-        return [float(x) for x in vector]
+    @property
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._settings.cloudflare_api_token}"}
 
     async def encode(self, text: str) -> list[float]:
-        """Return a 384-float, L2-normalized embedding for `text`."""
-        return await anyio.to_thread.run_sync(self._encode_sync, text)
+        """Return an L2-normalized embedding vector for `text`."""
+        try:
+            response = await self._client.post(
+                self._url, headers=self._headers, json={"text": text}
+            )
+            response.raise_for_status()
+            body = response.json()
+        except httpx.HTTPError as exc:
+            raise UpstreamLLMError(f"Cloudflare embeddings request failed: {exc}") from exc
+        return _l2_normalize(self._extract_vector(body))
+
+    @staticmethod
+    def _extract_vector(body: Any) -> list[float]:
+        """Pull the 1-D float vector out of a Cloudflare embeddings response.
+
+        Shape: ``{"result": {"shape": [1, N], "data": [[...N floats...]]},
+        "success": true}``.
+        """
+        if isinstance(body, dict) and body.get("success") is False:
+            raise UpstreamLLMError(f"Cloudflare embeddings error: {body.get('errors')}")
+        try:
+            data = body["result"]["data"]
+            vector = data[0] if data and isinstance(data[0], list) else data
+            return [float(x) for x in vector]
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise UpstreamLLMError(
+                f"Unexpected Cloudflare embeddings response: {body!r}"
+            ) from exc
 
     async def warmup(self) -> None:
-        """Force the model to load and run one encode, ahead of first request."""
-        await self.encode("warmup")
+        """Make one embedding call so a misconfig surfaces in logs before traffic.
+
+        Runs as a background task from the lifespan; never raises — a failure
+        here must not block startup, and the first real request would surface it
+        anyway.
+        """
+        try:
+            await self.encode("warmup")
+            logger.info("embedder_ready")
+        except Exception:
+            logger.warning("embedder_warmup_failed", exc_info=True)
+
+    async def aclose(self) -> None:
+        """Close the owned HTTP client (no-op if a client was injected)."""
+        if self._own_client:
+            await self._client.aclose()
 
 
 _embedder: Embedder | None = None
 
 
-def init_embedder(settings: Any, model_loader: ModelLoader | None = None) -> Embedder:
-    """Create (and remember) the module-level `Embedder` from `settings.embedding_model`."""
+def init_embedder(settings: Settings, client: httpx.AsyncClient | None = None) -> Embedder:
+    """Create (and remember) the module-level `Embedder`."""
     global _embedder
-    _embedder = Embedder(settings.embedding_model, model_loader=model_loader)
+    _embedder = Embedder(settings, client=client)
     return _embedder
 
 
@@ -86,4 +124,12 @@ def get_embedder() -> Embedder:
     return _embedder
 
 
-__all__ = ["Embedder", "ModelLoader", "init_embedder", "get_embedder"]
+async def dispose_embedder() -> None:
+    """Close and forget the module-level `Embedder`, if any."""
+    global _embedder
+    if _embedder is not None:
+        await _embedder.aclose()
+    _embedder = None
+
+
+__all__ = ["Embedder", "init_embedder", "get_embedder", "dispose_embedder"]

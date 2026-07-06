@@ -12,10 +12,6 @@ services:
   api:
     build:
       context: .
-      args:
-        # Bake the embedding model into the image so it isn't downloaded at
-        # runtime (needs the model files during build; ~500MB layer).
-        PRELOAD_EMBEDDINGS: "true"
     env_file: .env
     environment:
       # Match the ALB target-group port. Uvicorn reads ${PORT} (see Dockerfile).

@@ -1,7 +1,7 @@
 """Cache subsystem: the reason repeated/paraphrased questions skip the LLM.
 
 - `app.cache.normalizer`: question normalization + temporal-intent extraction.
-- `app.cache.embeddings`: lazy sentence-embedding provider.
+- `app.cache.embeddings`: Cloudflare-API text-embedding provider.
 - `app.cache.templater`: SQL literal parameterization for template reuse.
 - `app.cache.semantic`: L0 (exact) + L1 (semantic) query cache.
 - `app.cache.results`: L2 result-set cache.
