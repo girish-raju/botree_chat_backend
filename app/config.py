@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     # For managed hosts (Railway/Render) that only support env vars: the SSH
     # private key base64-encoded. Written to ssh_key_path on startup if set.
     ssh_key_b64: str = ""
+    # Seconds to wait for a TCP connection to the SSH bastion before giving up.
+    # Kept short so an unreachable/firewalled bastion fails fast with a clear
+    # error instead of hanging on the OS default (~45-90s) and stalling the
+    # request until the client disconnects.
+    ssh_connect_timeout_s: int = 8
 
     # Cache
     semantic_threshold: float = 0.92

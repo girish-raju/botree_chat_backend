@@ -57,7 +57,10 @@ def test_tunnel_enabled_lazy_starts_once() -> None:
     mock_instance.ssh_transport.is_active.return_value = True
     mock_instance.local_bind_port = 54321
 
-    with patch("app.db.analytics.SSHTunnelForwarder", return_value=mock_instance) as mock_cls:
+    with (
+        patch("app.db.analytics.SSHTunnelForwarder", return_value=mock_instance) as mock_cls,
+        patch.object(SSHTunnelManager, "_precheck_reachable"),
+    ):
         host1, port1 = manager.ensure_started()
         host2, port2 = manager.ensure_started()
 
@@ -80,10 +83,13 @@ def test_tunnel_restarts_when_dead() -> None:
     alive_instance.ssh_transport.is_active.return_value = True
     alive_instance.local_bind_port = 22222
 
-    with patch(
-        "app.db.analytics.SSHTunnelForwarder",
-        side_effect=[dead_instance, alive_instance],
-    ) as mock_cls:
+    with (
+        patch(
+            "app.db.analytics.SSHTunnelForwarder",
+            side_effect=[dead_instance, alive_instance],
+        ) as mock_cls,
+        patch.object(SSHTunnelManager, "_precheck_reachable"),
+    ):
         host1, port1 = manager.ensure_started()
         # Simulate the tunnel dying between calls.
         dead_instance.is_active = False

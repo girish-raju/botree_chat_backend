@@ -54,9 +54,12 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         else:
             try:
                 await session.commit()
-            except Exception:
+            except Exception as exc:
+                # Expected when a streaming client disconnects mid-response and
+                # poisons the session; we've already rolled back. Log the cause
+                # without a full traceback to avoid alarming noise.
                 await _safe_rollback(session)
-                logger.warning("session_commit_failed", exc_info=True)
+                logger.warning("session_commit_failed", error=str(exc))
 
 
 async def get_current_user(

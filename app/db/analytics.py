@@ -75,8 +75,33 @@ class SSHTunnelManager:
         except Exception:
             return False
 
+    def _precheck_reachable(self) -> None:
+        """Fail fast if the SSH bastion's TCP port is not reachable.
+
+        Without this, an unreachable or firewalled bastion (e.g. the managed
+        host's egress IP isn't allow-listed) makes the forwarder hang on the
+        OS-default TCP connect timeout (~45-90s), stalling the request until
+        the client disconnects. A short explicit connect attempt turns that
+        into a clean, quick error the pipeline can surface.
+        """
+        settings = self.settings
+        timeout = max(1, settings.ssh_connect_timeout_s)
+        try:
+            with socket.create_connection(
+                (settings.ssh_host, settings.ssh_port), timeout=timeout
+            ):
+                return
+        except OSError as exc:
+            raise OSError(
+                f"SSH bastion {settings.ssh_host}:{settings.ssh_port} is not "
+                f"reachable within {timeout}s ({exc}). If this host is behind "
+                f"an IP allow-list, the deployment's outbound IP must be "
+                f"added to it."
+            ) from exc
+
     def _start_forwarder(self) -> SSHTunnelForwarder:
         settings = self.settings
+        self._precheck_reachable()
         forwarder = SSHTunnelForwarder(
             (settings.ssh_host, settings.ssh_port),
             ssh_username=settings.ssh_user,
