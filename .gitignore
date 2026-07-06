@@ -12,3 +12,6 @@ playwright-report/
 test-results/
 .saropa/
 scripts/token_report_out.md
+
+# Local secrets files (never commit)
+*.local.md

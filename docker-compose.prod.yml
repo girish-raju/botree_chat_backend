@@ -1,0 +1,45 @@
+# Production compose for the Oracle Cloud VM.
+#
+# The app database is Neon (Postgres + pgvector) — set PG_DSN in .env to your
+# Neon connection string (see DEPLOYMENT.md for the exact asyncpg format). The
+# analytics MySQL is your Bisk Farm server, reached via the SSH tunnel using
+# the key mounted below. No local `db`/`mysql` containers here.
+
+services:
+  api:
+    build:
+      context: .
+      args:
+        # Bake the embedding model into the image so it doesn't download at
+        # runtime (needs the model files during build; ~500MB layer).
+        PRELOAD_EMBEDDINGS: "true"
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      # The Bisk Farm SSH private key on the VM, mounted read-only. Set
+      # SSH_KEY_PATH=/keys/aasim.niazi in .env to match this path.
+      - ~/.ssh/aasim.niazi:/keys/aasim.niazi:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  # Optional: web DB GUI. Reach it at http://<VM-IP>:5050 (or behind the proxy).
+  # Remove this block if you don't want pgAdmin in production.
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@botree.co.in}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-change-me}
+      PGADMIN_CONFIG_SERVER_MODE: "True"
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    restart: unless-stopped
+
+volumes:
+  pgadmin_data:
