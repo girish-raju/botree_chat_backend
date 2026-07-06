@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     ssh_user: str = ""
     ssh_key_path: str = ""
     ssh_key_password: str = ""
+    # For managed hosts (Railway/Render) that only support env vars: the SSH
+    # private key base64-encoded. Written to ssh_key_path on startup if set.
+    ssh_key_b64: str = ""
 
     # Cache
     semantic_threshold: float = 0.92
