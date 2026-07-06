@@ -113,3 +113,20 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+
+
+def main() -> None:
+    """Run the app with uvicorn, binding Settings.host:Settings.port.
+
+    Defaults to 0.0.0.0:8888 so a same-host reverse proxy (nginx / ALB) can
+    reach it. Run with ``python -m app.main``. Override with env vars, e.g.
+    ``PORT=8000 python -m app.main`` for local dev alongside the frontend.
+    """
+    import uvicorn
+
+    settings = get_settings()
+    uvicorn.run(app, host=settings.host, port=settings.port)
+
+
+if __name__ == "__main__":
+    main()

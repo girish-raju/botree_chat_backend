@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     app_env: str = "dev"
     log_level: str = "INFO"
 
+    # Server bind address for `python -m app.main`. Defaults to 0.0.0.0:8888 so
+    # a reverse proxy / load balancer on the same host can reach it. Override
+    # per environment via HOST / PORT (e.g. `PORT=8000` for local dev alongside
+    # the frontend). The Docker image's CMD also honors $PORT.
+    host: str = "0.0.0.0"
+    port: int = 8888
+
     # Auth
     jwt_secret: str = "change-me"
     jwt_algorithm: str = "HS256"
