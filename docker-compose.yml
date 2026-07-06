@@ -1,0 +1,82 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: botree
+      POSTGRES_PASSWORD: botree
+      POSTGRES_DB: botree_chat
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U botree -d botree_chat"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Web-based Postgres GUI. Open http://localhost:5050 in a browser.
+  # Login: admin@botree.co.in / admin  (change via env below for real deploys).
+  # The Postgres connection is pre-registered via servers.json — after logging
+  # in, expand "Botree Chat (local)" and enter the DB password `botree` when
+  # prompted (pgAdmin does not persist the DB password by default).
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@botree.co.in
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    ports:
+      - "5050:80"
+    volumes:
+      - ./docker/pgadmin-servers.json:/pgadmin4/servers.json:ro
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build: .
+    env_file: .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # LOCAL synthetic stand-in for the real Bisk Farm analytics MySQL (used when
+  # the SSH tunnel to the real host isn't available, e.g. this machine has no
+  # key). Schema + seed data live in docker/mysql-init/{01-schema,02-seed}.sql
+  # and run automatically on first boot via the entrypoint mount below.
+  #
+  # To point the backend at this local MySQL instead of the real one, set in
+  # `.env`:
+  #   MYSQL_HOST=127.0.0.1
+  #   MYSQL_PORT=3307
+  #   MYSQL_USER=root
+  #   MYSQL_PASSWORD=botree
+  #   MYSQL_DATABASE=biskfarm_report_pp3
+  #   SSH_TUNNEL_ENABLED=false
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: botree
+      MYSQL_DATABASE: biskfarm_report_pp3
+      MYSQL_USER: botree
+      MYSQL_PASSWORD: botree
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysqldata:/var/lib/mysql
+      - ./docker/mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-uroot", "-pbotree", "--silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  pgdata:
+  pgadmin_data:
+  mysqldata:

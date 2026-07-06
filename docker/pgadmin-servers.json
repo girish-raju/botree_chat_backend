@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "Botree Chat (local)",
+      "Group": "Servers",
+      "Host": "db",
+      "Port": 5432,
+      "MaintenanceDB": "botree_chat",
+      "Username": "botree",
+      "SSLMode": "prefer",
+      "Comment": "Local pgvector Postgres for Botree Chat. DB password: botree"
+    }
+  }
+}

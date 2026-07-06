@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "botree-chat-backend"
+version = "0.1.0"
+description = "Botree natural-language-to-SQL chatbot backend"
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg",
+    "alembic",
+    "pgvector",
+    "greenlet",
+    "pymysql",
+    "dbutils",
+    "sshtunnel",
+    "sqlglot>=25",
+    "anthropic",
+    "httpx",
+    "sentence-transformers",
+    "pyjwt",
+    "bcrypt",
+    "pydantic-settings",
+    "structlog",
+    "python-multipart",
+    "anyio",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+    "aiosqlite",
+    "ruff",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
