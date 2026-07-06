@@ -190,20 +190,25 @@ class CloudflareProvider:
         retry_answer = (retry_parsed or {}).get("answer") or None
         tot_in, tot_out = tokens_in + r_in, tokens_out + r_out
 
-        if retry_mode == "db":
+        if retry_mode == "db" and retry_sql.strip():
             retry_error = validate(retry_sql) if validate is not None else None
             if retry_error is None:
                 return SQLPlan(
                     sql=retry_sql, mode="db", answer=retry_answer, attempts=2,
                     tokens_in=tot_in, tokens_out=tot_out,
                 )
-            raise UpstreamLLMError(
-                f"could not produce valid SQL after 2 attempts: {retry_error}"
-            )
+            # The retry produced invalid SQL. If the FIRST attempt was a real
+            # data query, that's a genuine failure. But if the first attempt was
+            # a general answer (e.g. "who is the PM of India?"), forcing SQL just
+            # yields junk — fall through and return the conversational answer.
+            if not first_was_general:
+                raise UpstreamLLMError(
+                    f"could not produce valid SQL after 2 attempts: {retry_error}"
+                )
 
-        # Retry still came back general. If the FIRST attempt was a genuine
-        # general question (not a forced DB retry), accept it. If we were trying
-        # to fix bad SQL, that's a failure.
+        # Retry came back general/empty, OR it was a general question we couldn't
+        # (and shouldn't) turn into SQL. Return the conversational answer instead
+        # of erroring — a general question is a valid outcome, not a failure.
         if first_was_general:
             return SQLPlan(
                 sql="", mode="general", answer=retry_answer or answer, attempts=2,

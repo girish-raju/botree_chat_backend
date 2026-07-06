@@ -540,3 +540,26 @@ async def test_cloudflare_genuine_general_survives_forced_retry():
 
     assert plan.mode == "general"
     assert plan.answer
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_general_question_with_empty_db_retry_returns_answer():
+    """Regression (prod crash): a genuine general question ('who is the PM of
+    India?') that, when forced to DB, returns mode='db' with EMPTY sql must NOT
+    raise — it returns the conversational answer."""
+    g1 = {"result": {"response": {"mode": "general", "sql": "",
+                                  "answer": "The PM of India is Narendra Modi."}}}
+    # forced retry: model complies with mode=db but produces no SQL
+    r2 = {"result": {"response": {"mode": "db", "sql": "",
+                                  "answer": "Narendra Modi is the current PM."}}}
+    client = MagicMock()
+    client.post = AsyncMock(side_effect=[_cf_response(g1), _cf_response(r2)])
+    provider = CloudflareProvider(_settings(llm_provider="cloudflare"), client=client)
+
+    def validate(sql: str) -> str | None:
+        return "Empty SQL statement is not allowed." if not sql.strip() else None
+
+    plan = await provider.generate_sql("Hi, who is the PM of India?", [], validate=validate)
+
+    assert plan.mode == "general"
+    assert plan.answer  # a conversational answer, not an error
