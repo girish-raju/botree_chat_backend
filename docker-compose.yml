@@ -39,6 +39,10 @@ services:
   api:
     build: .
     env_file: .env
+    environment:
+      # Keep local dev on 8000 (the frontend's default BACKEND_URL). The image
+      # itself now defaults to 8888; prod compose runs on 8888.
+      PORT: "8000"
     ports:
       - "8000:8000"
     depends_on:

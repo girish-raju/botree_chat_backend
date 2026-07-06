@@ -30,8 +30,9 @@ COPY app ./app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-EXPOSE 8000
+EXPOSE 8888
 
-# Shell form so ${PORT} (injected by managed hosts like Railway) is expanded;
-# falls back to 8000 for local/docker-compose use.
-CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
+# Shell form so ${PORT} is expanded when set. Defaults to 8888 — the port the
+# AWS/nginx reverse proxy forwards to — so a plain `docker run` (or the prod
+# compose) serves on 8888. Local dev pins PORT=8000 in docker-compose.yml.
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8888}
