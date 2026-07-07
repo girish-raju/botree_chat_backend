@@ -231,12 +231,12 @@ class CloudflareProvider:
         )
         payload = {"messages": [{"role": "user", "content": prompt}], "stream": True}
 
+        got_any = False
         try:
             async with self._client.stream(
                 "POST", self._url, headers=self._headers, json=payload
             ) as response:
                 response.raise_for_status()
-                got_any = False
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"):
                         continue
@@ -251,12 +251,18 @@ class CloudflareProvider:
                     if delta != "" and delta is not None:
                         got_any = True
                         yield delta if isinstance(delta, str) else str(delta)
-                if got_any:
-                    return
         except httpx.HTTPError:
+            # If ANY answer text was already yielded, never fall back — the
+            # fallback would generate a second, different answer and the user
+            # would see two answers in one message. A truncated single answer
+            # beats a duplicated one.
             pass
 
-        # Fall back to a non-streaming call, yielded as a single chunk.
+        if got_any:
+            return
+
+        # Nothing streamed at all: fall back to a non-streaming call, yielded
+        # as a single chunk.
         body = await self._run({"messages": [{"role": "user", "content": prompt}]})
         yield self._extract_text(body)
 
