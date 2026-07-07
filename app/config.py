@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     ssh_user: str = ""
     ssh_key_path: str = ""
     ssh_key_password: str = ""
+    # For hosts where the key file isn't on disk (e.g. the AWS server, whose
+    # .env carries the key as base64): decoded and written to ssh_key_path on
+    # startup if set. See _materialize_ssh_key in app/main.py.
+    ssh_key_b64: str = ""
 
     # Cache
     semantic_threshold: float = 0.92
