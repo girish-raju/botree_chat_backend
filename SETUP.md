@@ -4,7 +4,7 @@ From-zero instructions to get the backend running locally. See `README.md`
 for what this is, `CODEBASE.md` for how it's built, `CONTRIBUTING.md` for the
 dev loop once you're up and running.
 
-## Prerequisites
+## Prerequisites 
 
 - **Python 3.11+** (developed/tested on 3.12). Check with `python3 --version`.
 - **Docker** (for the Postgres + pgvector container via `docker-compose.yml`).
