@@ -30,18 +30,22 @@ _ROW_DUMP_RE = re.compile(r"\[\s*\{.*?\}\s*\]", re.DOTALL)
 
 
 def scrub_raw_row_dumps(text: str) -> str:
-    """Remove echoed raw-row dumps (`[{'col': ...}, ...]`) from answer text.
+    """Remove echoed data from LLM answer text, keeping only the prose.
 
     Small models sometimes parrot the grounding rows from the prompt back
-    into their answer as a Python/JSON list of dicts. The real data is always
-    appended as a proper table, so any such dump is pure noise — strip
-    complete `[{...}]` spans, then any unterminated `[{...` tail, and tidy
-    the leftover whitespace.
+    into their answer — as a Python/JSON list of dicts (`[{'col': ...}]`) or
+    as a self-made markdown table. The real, complete table is ALWAYS
+    appended deterministically by the pipeline, so any data structure in the
+    LLM's own text is a duplicate: strip complete `[{...}]` spans, any
+    unterminated `[{...` tail, every markdown-table line (`| ... |`), and
+    tidy the leftover whitespace.
     """
     cleaned = _ROW_DUMP_RE.sub("", text)
     start = cleaned.find("[{")
     if start != -1 and "}]" not in cleaned[start:]:
         cleaned = cleaned[:start]
+    lines = [line for line in cleaned.splitlines() if not line.lstrip().startswith("|")]
+    cleaned = "\n".join(lines)
     cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()

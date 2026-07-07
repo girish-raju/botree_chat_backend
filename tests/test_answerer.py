@@ -53,6 +53,21 @@ def test_scrub_keeps_clean_text_untouched() -> None:
     assert scrub_raw_row_dumps(text) == text
 
 
+def test_scrub_removes_llm_written_markdown_table() -> None:
+    text = (
+        "The total sales across all months is 1,079,287.11 rupees.\n\n"
+        "| invoice_date | TotalSales |\n"
+        "| --- | --- |\n"
+        "| 2024-03-03 | 847626.90027 |\n"
+        "| 2024-03-11 | 64096.435017 |\n\n"
+        "March 2024 has the highest sales."
+    )
+    assert scrub_raw_row_dumps(text) == (
+        "The total sales across all months is 1,079,287.11 rupees.\n\n"
+        "March 2024 has the highest sales."
+    )
+
+
 async def test_stream_answer_scrubs_dump_from_llm_output() -> None:
     text = await _answer_text(
         ["Top brand is BHUJIA. ", "[{'a': 1}, ", "{'a': 2}]", " Great month."]
