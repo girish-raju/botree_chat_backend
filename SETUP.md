@@ -415,3 +415,5 @@ osascript -e 'quit app "Docker"'
 > Order matters when shutting down for the day: `Ctrl-C`/`pkill` the backend
 > first, then `docker compose stop`. To wipe and start clean, use
 > `docker compose down -v` and re-run steps 5–6 (migrate + seed).
+
+Backend in AWS
