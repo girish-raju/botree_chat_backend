@@ -15,6 +15,7 @@ from __future__ import annotations
 import functools
 from datetime import date
 
+from app.domain.formatting import format_rupees, is_money_column
 from app.domain.glossary import BUSINESS_GLOSSARY, STATE_NAME_MAP
 from app.domain.schema_catalog import RELATIONSHIPS, SCHEMA_DESCRIPTION, format_schema_description
 from app.domain.sql_rules import FEW_SHOT_EXAMPLES, SQL_RULES
@@ -90,9 +91,10 @@ ANSWER_PROMPT = """You are answering a business question using ONLY the facts an
 provided below. NEVER invent or estimate numbers that are not given. Rupee/currency \
 amounts must be reported exactly as given (do not rescale or reformat magnitudes). \
 Write a concise business summary of 1-3 sentences leading with the key total, \
-top item, or insight. Output plain English sentences ONLY — NEVER repeat or echo \
-the rows, lists, JSON, dictionaries, brackets, or any key:value data dump in your \
-answer. The complete data is appended to your answer as a table automatically, \
+top item, or insight. Write ALL numbers with Indian digit grouping (for example \
+12,23,23,123.45), never Western grouping like 122,323,123. Output plain English \
+sentences ONLY — NEVER repeat or echo the rows, lists, JSON, dictionaries, \
+brackets, or any key:value data dump in your answer. The complete data is appended to your answer as a table automatically, \
 so do NOT list individual rows, do NOT write a table yourself, and do NOT \
 describe the data as a sample, subset, or "available data". \
 Do not mention SQL or columns.
@@ -124,10 +126,24 @@ def render_answer_facts(facts: dict) -> str:
 
 
 def render_sample_rows(sample_rows: list[dict], columns: list[str]) -> str:
-    """Format grounding rows as readable per-row lines (never dict/JSON repr)."""
+    """Format grounding rows as readable per-row lines (never dict/JSON repr).
+
+    Money values are pre-formatted as Indian-grouped rupees so the model
+    quotes them in the same style instead of inventing Western grouping.
+    """
+
+    def fmt(col: str, value: object) -> str:
+        if (
+            is_money_column(col)
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+        ):
+            return format_rupees(value)
+        return str(value)
+
     lines = []
     for i, row in enumerate(sample_rows, 1):
-        pairs = ", ".join(f"{col}: {row.get(col)}" for col in columns)
+        pairs = ", ".join(f"{col}: {fmt(col, row.get(col))}" for col in columns)
         lines.append(f"Row {i} -> {pairs}")
     return "\n".join(lines) if lines else "(none)"
 

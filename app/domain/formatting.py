@@ -125,6 +125,34 @@ def is_money_column(name: str) -> bool:
     return any(h in c for h in MONEY_HINTS)
 
 
+#: A Western-grouped number (all comma groups of 3, e.g. 122,323,123.45).
+#: Lookarounds stop it matching inside an already-Indian-grouped number.
+_WESTERN_GROUPED_RE = re.compile(r"(?<![\d,])\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d,])")
+
+
+def _indian_grouping(digits: str) -> str:
+    if len(digits) <= 3:
+        return digits
+    rest = re.sub(r"(\d)(?=(\d\d)+$)", r"\1,", digits[:-3])
+    return rest + "," + digits[-3:]
+
+
+def regroup_western_numbers(text: str) -> str:
+    """Rewrite Western digit grouping to Indian grouping in prose text.
+
+    "122,323,123.45" -> "12,23,23,123.45"; numbers that are already Indian-
+    grouped, ungrouped (2024), or identical in both systems (84,000) are
+    left untouched. Used on LLM answer text, which tends to fall back to
+    Western grouping no matter what the prompt says.
+    """
+
+    def repl(match: re.Match[str]) -> str:
+        whole, dot, frac = match.group().partition(".")
+        return _indian_grouping(whole.replace(",", "")) + dot + frac
+
+    return _WESTERN_GROUPED_RE.sub(repl, text)
+
+
 def format_rupees(value: Any) -> str:
     """Format a number as Indian-style rupees: ₹250, ₹25,000, ₹2,50,000.
 

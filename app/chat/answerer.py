@@ -17,7 +17,12 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from app.cache.results import jsonable_rows
-from app.domain.formatting import compute_total_facts, format_rupees, is_money_column
+from app.domain.formatting import (
+    compute_total_facts,
+    format_rupees,
+    is_money_column,
+    regroup_western_numbers,
+)
 from app.llm.base import LLMProvider
 
 #: Deterministic answer for an empty result set (no LLM call).
@@ -28,24 +33,45 @@ _MAX_SAMPLE_ROWS = 5
 #: A raw row dump echoed by the LLM: "[{...}]" possibly spanning lines.
 _ROW_DUMP_RE = re.compile(r"\[\s*\{.*?\}\s*\]", re.DOTALL)
 
+#: Column-aligned text (2+ consecutive inner spaces), e.g. "WB STATE   44000.0".
+_ALIGNED_COLUMNS_RE = re.compile(r"\S\s{2,}\S")
+
+#: A line whose last token is a bare/rupee number, e.g. "KERALA STATE 38000.0".
+_TRAILING_NUMBER_RE = re.compile(r"₹?[\d,]+(?:\.\d+)?$")
+
+
+def _is_data_line(line: str) -> bool:
+    """True for lines that are table/row echoes rather than prose sentences."""
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("|"):
+        return True  # markdown table row
+    if _ALIGNED_COLUMNS_RE.search(stripped):
+        return True  # whitespace-aligned columns
+    # Short label+number lines ("TAMILNADU STATE 121000.0") are row echoes;
+    # real sentences are longer and end with punctuation, not a raw number.
+    return bool(_TRAILING_NUMBER_RE.search(stripped)) and len(stripped.split()) <= 5
+
 
 def scrub_raw_row_dumps(text: str) -> str:
     """Remove echoed data from LLM answer text, keeping only the prose.
 
     Small models sometimes parrot the grounding rows from the prompt back
-    into their answer — as a Python/JSON list of dicts (`[{'col': ...}]`) or
-    as a self-made markdown table. The real, complete table is ALWAYS
-    appended deterministically by the pipeline, so any data structure in the
-    LLM's own text is a duplicate: strip complete `[{...}]` spans, any
-    unterminated `[{...` tail, every markdown-table line (`| ... |`), and
-    tidy the leftover whitespace.
+    into their answer — as a Python/JSON list of dicts (`[{'col': ...}]`),
+    a self-made markdown table, or whitespace-aligned columns. The real,
+    complete table is ALWAYS appended deterministically by the pipeline, so
+    any data structure in the LLM's own text is a duplicate: strip complete
+    `[{...}]` spans, any unterminated `[{...` tail, every table-like line
+    (see `_is_data_line`), and tidy the leftover whitespace.
     """
     cleaned = _ROW_DUMP_RE.sub("", text)
     start = cleaned.find("[{")
     if start != -1 and "}]" not in cleaned[start:]:
         cleaned = cleaned[:start]
-    lines = [line for line in cleaned.splitlines() if not line.lstrip().startswith("|")]
-    cleaned = "\n".join(lines)
+    cleaned = "\n".join(
+        line for line in cleaned.splitlines() if not _is_data_line(line)
+    )
     cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
@@ -148,7 +174,7 @@ async def stream_answer_text(
         if delta:
             chunks.append(delta)
 
-    answer = scrub_raw_row_dumps("".join(chunks))
+    answer = regroup_western_numbers(scrub_raw_row_dumps("".join(chunks)))
     yield answer or str(facts.get("lead_in", ""))
 
 

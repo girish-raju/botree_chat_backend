@@ -9,6 +9,7 @@ from app.chat.answerer import (
     scrub_raw_row_dumps,
     stream_answer_text,
 )
+from app.domain.formatting import regroup_western_numbers
 
 
 class _EchoProvider:
@@ -80,6 +81,39 @@ async def test_stream_answer_scrubs_dump_from_llm_output() -> None:
 async def test_stream_answer_falls_back_to_lead_in_when_all_noise() -> None:
     text = await _answer_text(["[{'a': 1}]"])
     assert text == "I found 2 matching rows."
+
+
+def test_scrub_removes_whitespace_aligned_table() -> None:
+    text = (
+        "The total sales across different geographies amount to 1,93,000 rupees.\n\n"
+        "Geography      TotalSales\n"
+        "TAMILNADU STATE 121000.0\n"
+        "WB STATE        44000.0\n"
+        "KERALA STATE    38000.0\n"
+    )
+    assert scrub_raw_row_dumps(text) == (
+        "The total sales across different geographies amount to 1,93,000 rupees."
+    )
+
+
+def test_regroup_western_numbers_to_indian() -> None:
+    assert regroup_western_numbers("total is 122,323,123.45 rupees") == (
+        "total is 12,23,23,123.45 rupees"
+    )
+    assert regroup_western_numbers("sales of 1,079,287.11") == "sales of 10,79,287.11"
+    assert regroup_western_numbers("July had 132,000") == "July had 1,32,000"
+
+
+def test_regroup_leaves_correct_numbers_alone() -> None:
+    # Identical in both systems, already-Indian, and ungrouped numbers.
+    assert regroup_western_numbers("84,000 in 2024") == "84,000 in 2024"
+    assert regroup_western_numbers("₹12,23,23,123.45 total") == "₹12,23,23,123.45 total"
+    assert regroup_western_numbers("row 847626.90027") == "row 847626.90027"
+
+
+async def test_stream_answer_regroups_llm_western_numbers() -> None:
+    text = await _answer_text(["The total sales is 1,079,287.11 rupees."])
+    assert text == "The total sales is 10,79,287.11 rupees."
 
 
 def test_renders_all_rows_not_a_sample() -> None:
