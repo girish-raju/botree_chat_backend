@@ -89,8 +89,11 @@ Output ONLY the rewritten question, with no preamble, quotes, or explanation."""
 ANSWER_PROMPT = """You are answering a business question using ONLY the facts and sample rows \
 provided below. NEVER invent or estimate numbers that are not given. Rupee/currency \
 amounts must be reported exactly as given (do not rescale or reformat magnitudes). \
-Write a concise, natural business answer (a few sentences, or a short list if \
-appropriate). Do not mention SQL, tables, or columns.
+Write a concise business summary of 1-3 sentences leading with the key total, \
+top item, or insight. The complete data is appended to your answer as a table \
+automatically, so do NOT list individual rows, do NOT write a table yourself, \
+and do NOT describe the data as a sample, subset, or "available data". \
+Do not mention SQL or columns.
 
 Question: {question}
 

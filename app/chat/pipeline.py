@@ -26,7 +26,7 @@ from app.cache.normalizer import extract_temporal_intent, normalize_question
 from app.cache.results import ResultCache, jsonable_rows, result_cache_key
 from app.cache.semantic import QueryCache
 from app.cache.templater import bind_template, parameterize_sql
-from app.chat.answerer import build_facts, stream_answer_text
+from app.chat.answerer import build_facts, render_markdown_table, stream_answer_text
 from app.chat.rewriter import maybe_rewrite
 from app.config import Settings
 from app.db.analytics import AnalyticsDB, get_analytics
@@ -331,6 +331,13 @@ class ChatPipeline:
                 self.provider, rewritten, facts, columns, rows
             ):
                 yield TextDelta(delta)
+
+            # 12b. Always append the FULL result set as a markdown table.
+            # Deterministic (not LLM-generated), so every data-driven answer
+            # shows all rows in tabular form on the first attempt.
+            table = render_markdown_table(columns, rows)
+            if table:
+                yield TextDelta("\n\n" + table)
 
             # 13. Done + audit.
             await self._audit(

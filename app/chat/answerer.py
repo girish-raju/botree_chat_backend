@@ -5,7 +5,9 @@
 rupees, and attaches a small sample of rows plus a fast deterministic lead-in.
 `stream_answer_text` streams the prose answer from the LLM — except for empty
 result sets, which get a deterministic "no matching data" sentence with no LLM
-call at all.
+call at all. `render_markdown_table` renders the FULL result set as a markdown
+table, appended to every data-driven answer by the pipeline so the user always
+sees all rows (the LLM only writes the short summary above it).
 """
 
 from __future__ import annotations
@@ -21,6 +23,36 @@ from app.llm.base import LLMProvider
 NO_DATA_SENTENCE = "I couldn't find any matching data for that question."
 
 _MAX_SAMPLE_ROWS = 5
+
+
+def render_markdown_table(columns: list[str], rows: list[dict[str, Any]]) -> str:
+    """Render the full result set as a GitHub-flavored markdown table.
+
+    Deterministic — the LLM never sees or produces this, so every row the
+    query returned is shown, with money columns formatted as rupees. Returns
+    "" when a table adds nothing: no rows, no columns, or a single scalar
+    (1 row x 1 column), whose value the prose answer already states.
+    """
+    if not rows or not columns or (len(rows) == 1 and len(columns) == 1):
+        return ""
+
+    def escape(text: str) -> str:
+        return text.replace("|", "\\|").replace("\n", " ")
+
+    def cell(col: str, value: Any) -> str:
+        if value is None:
+            return ""
+        if is_money_column(col) and isinstance(value, (int, float)) and not isinstance(value, bool):
+            return format_rupees(value)
+        return escape(str(value))
+
+    lines = [
+        "| " + " | ".join(escape(col) for col in columns) + " |",
+        "| " + " | ".join("---" for _ in columns) + " |",
+    ]
+    for row in jsonable_rows(rows):
+        lines.append("| " + " | ".join(cell(col, row.get(col)) for col in columns) + " |")
+    return "\n".join(lines)
 
 
 def _lead_in(row_count: int) -> str:
@@ -86,4 +118,9 @@ async def stream_answer_text(
             yield delta
 
 
-__all__ = ["build_facts", "stream_answer_text", "NO_DATA_SENTENCE"]
+__all__ = [
+    "build_facts",
+    "stream_answer_text",
+    "render_markdown_table",
+    "NO_DATA_SENTENCE",
+]

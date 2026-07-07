@@ -224,6 +224,48 @@ async def test_l1_hit_path(session):
     assert audits[0].status == "ok"
 
 
+async def test_data_answer_appends_full_result_table(session):
+    """Every data-driven answer must include ALL rows as a markdown table."""
+    rows = [{"code": f"D{i}", "name": f"Dist {i}"} for i in range(20)]
+    qc = _query_cache(exact=_cache_entry())
+    analytics = FakeAnalytics(result=_query_result(rows=rows))
+    provider = FakeProvider(deltas=("Here are your distributors.",))
+    pipeline = _build_pipeline(provider, qc, _result_cache(), analytics)
+    user = await _make_user(session)
+
+    events = await _collect(
+        pipeline, user=user, thread_id=None, question="list distributors",
+        history=[], session=session,
+    )
+
+    text = "".join(e.text for e in events if isinstance(e, TextDelta))
+    assert "Here are your distributors." in text
+    assert "| code | name |" in text
+    # All 20 rows are present — not just the 5-row LLM sample.
+    for i in range(20):
+        assert f"| D{i} |" in text
+
+
+async def test_scalar_answer_has_no_table(session):
+    """A single-value result (e.g. 'total sales this month') stays prose-only."""
+    qc = _query_cache(exact=_cache_entry())
+    analytics = FakeAnalytics(
+        result=_query_result(columns=["total"], rows=[{"total": 12345.0}])
+    )
+    provider = FakeProvider(deltas=("Total sales this month: ₹12,345.",))
+    pipeline = _build_pipeline(provider, qc, _result_cache(), analytics)
+    user = await _make_user(session)
+
+    events = await _collect(
+        pipeline, user=user, thread_id=None, question="total sales this month",
+        history=[], session=session,
+    )
+
+    text = "".join(e.text for e in events if isinstance(e, TextDelta))
+    assert "Total sales this month" in text
+    assert "| --- |" not in text
+
+
 async def test_miss_path_generates_executes_and_stores(session):
     plan = SQLPlan(sql=SAFE_SQL, mode="db", tokens_in=11, tokens_out=22)
     provider = FakeProvider(plan=plan)
