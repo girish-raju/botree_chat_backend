@@ -33,8 +33,11 @@ _MAX_SAMPLE_ROWS = 5
 #: A raw row dump echoed by the LLM: "[{...}]" possibly spanning lines.
 _ROW_DUMP_RE = re.compile(r"\[\s*\{.*?\}\s*\]", re.DOTALL)
 
-#: Column-aligned text (2+ consecutive inner spaces), e.g. "WB STATE   44000.0".
-_ALIGNED_COLUMNS_RE = re.compile(r"\S\s{2,}\S")
+#: Column-aligned text (3+ consecutive inner spaces), e.g. "WB STATE   44000.0".
+#: Requires 3+ so incidental double spaces in prose (e.g. left behind by dump
+#: removal) never get a sentence dropped; 2-space-aligned data rows are still
+#: caught by the trailing-number rule below.
+_ALIGNED_COLUMNS_RE = re.compile(r"\S\s{3,}\S")
 
 #: A line whose last token is a bare/rupee number, e.g. "KERALA STATE 38000.0".
 _TRAILING_NUMBER_RE = re.compile(r"₹?[\d,]+(?:\.\d+)?$")
@@ -74,6 +77,7 @@ def scrub_raw_row_dumps(text: str) -> str:
     )
     cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r" {2,}", " ", cleaned)
     return cleaned.strip()
 
 
