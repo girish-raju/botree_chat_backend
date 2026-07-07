@@ -12,6 +12,7 @@ sees all rows (the LLM only writes the short summary above it).
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -23,6 +24,27 @@ from app.llm.base import LLMProvider
 NO_DATA_SENTENCE = "I couldn't find any matching data for that question."
 
 _MAX_SAMPLE_ROWS = 5
+
+#: A raw row dump echoed by the LLM: "[{...}]" possibly spanning lines.
+_ROW_DUMP_RE = re.compile(r"\[\s*\{.*?\}\s*\]", re.DOTALL)
+
+
+def scrub_raw_row_dumps(text: str) -> str:
+    """Remove echoed raw-row dumps (`[{'col': ...}, ...]`) from answer text.
+
+    Small models sometimes parrot the grounding rows from the prompt back
+    into their answer as a Python/JSON list of dicts. The real data is always
+    appended as a proper table, so any such dump is pure noise — strip
+    complete `[{...}]` spans, then any unterminated `[{...` tail, and tidy
+    the leftover whitespace.
+    """
+    cleaned = _ROW_DUMP_RE.sub("", text)
+    start = cleaned.find("[{")
+    if start != -1 and "}]" not in cleaned[start:]:
+        cleaned = cleaned[:start]
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 def render_markdown_table(columns: list[str], rows: list[dict[str, Any]]) -> str:
@@ -102,25 +124,34 @@ async def stream_answer_text(
     columns: list[str],
     rows: list[dict[str, Any]],
 ) -> AsyncIterator[str]:
-    """Yield the natural-language answer as text deltas.
+    """Yield the natural-language answer text.
 
     For empty result sets, yields a single deterministic sentence WITHOUT
     calling the LLM. Otherwise delegates to `provider.stream_answer`, grounded
-    in the deterministic `facts` and a small sample of rows.
+    in the deterministic `facts` and a small sample of rows. The LLM output is
+    buffered and scrubbed of echoed raw-row dumps before being yielded — a
+    guaranteed-clean short summary beats token-streaming noise the frontend
+    would have to unrender. Falls back to the deterministic lead-in if
+    scrubbing leaves nothing.
     """
     if not rows:
         yield NO_DATA_SENTENCE
         return
 
     sample_rows = facts.get("sample", [])
+    chunks: list[str] = []
     async for delta in provider.stream_answer(question, facts, sample_rows, columns):
         if delta:
-            yield delta
+            chunks.append(delta)
+
+    answer = scrub_raw_row_dumps("".join(chunks))
+    yield answer or str(facts.get("lead_in", ""))
 
 
 __all__ = [
     "build_facts",
     "stream_answer_text",
     "render_markdown_table",
+    "scrub_raw_row_dumps",
     "NO_DATA_SENTENCE",
 ]

@@ -90,9 +90,11 @@ ANSWER_PROMPT = """You are answering a business question using ONLY the facts an
 provided below. NEVER invent or estimate numbers that are not given. Rupee/currency \
 amounts must be reported exactly as given (do not rescale or reformat magnitudes). \
 Write a concise business summary of 1-3 sentences leading with the key total, \
-top item, or insight. The complete data is appended to your answer as a table \
-automatically, so do NOT list individual rows, do NOT write a table yourself, \
-and do NOT describe the data as a sample, subset, or "available data". \
+top item, or insight. Output plain English sentences ONLY — NEVER repeat or echo \
+the rows, lists, JSON, dictionaries, brackets, or any key:value data dump in your \
+answer. The complete data is appended to your answer as a table automatically, \
+so do NOT list individual rows, do NOT write a table yourself, and do NOT \
+describe the data as a sample, subset, or "available data". \
 Do not mention SQL or columns.
 
 Question: {question}
@@ -104,6 +106,30 @@ Sample rows (up to 5, columns: {columns}):
 {sample_rows}
 
 Answer:"""
+
+
+def render_answer_facts(facts: dict) -> str:
+    """Format the deterministic facts as readable lines for the answer prompt.
+
+    Interpolating the raw facts dict tempts small models into echoing Python
+    repr syntax back into their answer; plain labelled lines don't.
+    """
+    lines = [f"Rows returned: {facts.get('row_count', 0)}"]
+    totals = facts.get("totals_display") or {}
+    for col, value in totals.items():
+        lines.append(f"Sum of {col} across ALL rows: {value}")
+    if facts.get("truncated"):
+        lines.append("The result was capped at a maximum row limit.")
+    return "\n".join(lines)
+
+
+def render_sample_rows(sample_rows: list[dict], columns: list[str]) -> str:
+    """Format grounding rows as readable per-row lines (never dict/JSON repr)."""
+    lines = []
+    for i, row in enumerate(sample_rows, 1):
+        pairs = ", ".join(f"{col}: {row.get(col)}" for col in columns)
+        lines.append(f"Row {i} -> {pairs}")
+    return "\n".join(lines) if lines else "(none)"
 
 
 TITLE_PROMPT = """Generate a short title (6 words or fewer) summarizing the following text. \
@@ -183,6 +209,8 @@ __all__ = [
     "build_dynamic_system_block",
     "REWRITE_PROMPT",
     "ANSWER_PROMPT",
+    "render_answer_facts",
+    "render_sample_rows",
     "TITLE_PROMPT",
     "CLOUDFLARE_SQL_PROMPT",
 ]

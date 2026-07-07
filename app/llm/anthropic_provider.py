@@ -21,6 +21,8 @@ from app.llm.prompts import (
     TITLE_PROMPT,
     build_dynamic_system_block,
     build_static_system_block,
+    render_answer_facts,
+    render_sample_rows,
 )
 
 _QUERY_DATABASE_TOOL = {
@@ -177,9 +179,9 @@ class AnthropicProvider:
     ) -> AsyncIterator[str]:
         prompt = ANSWER_PROMPT.format(
             question=question,
-            facts=facts,
+            facts=render_answer_facts(facts),
             columns=", ".join(columns),
-            sample_rows=sample_rows[:5],
+            sample_rows=render_sample_rows(sample_rows[:5], columns),
         )
         try:
             async with self._client.messages.stream(

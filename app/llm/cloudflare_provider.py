@@ -19,7 +19,14 @@ import httpx
 from app.config import Settings
 from app.errors import UpstreamLLMError
 from app.llm.base import SQLPlan, Turn, ValidateHook
-from app.llm.prompts import ANSWER_PROMPT, CLOUDFLARE_SQL_PROMPT, REWRITE_PROMPT, TITLE_PROMPT
+from app.llm.prompts import (
+    ANSWER_PROMPT,
+    CLOUDFLARE_SQL_PROMPT,
+    REWRITE_PROMPT,
+    TITLE_PROMPT,
+    render_answer_facts,
+    render_sample_rows,
+)
 
 _BASE_URL = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
 
@@ -225,9 +232,9 @@ class CloudflareProvider:
     ) -> AsyncIterator[str]:
         prompt = ANSWER_PROMPT.format(
             question=question,
-            facts=facts,
+            facts=render_answer_facts(facts),
             columns=", ".join(columns),
-            sample_rows=sample_rows[:5],
+            sample_rows=render_sample_rows(sample_rows[:5], columns),
         )
         payload = {"messages": [{"role": "user", "content": prompt}], "stream": True}
 
