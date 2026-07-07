@@ -15,3 +15,12 @@ scripts/token_report_out.md
 
 # Local secrets files (never commit)
 *.local.md
+
+# Local working docs — do not commit
+CODEBASE.md
+CONTRIBUTING.md
+DEPLOYMENT.md
+TECH_JUSTIFICATION.md
+TEST_PLAN.md
+TEST_REPORT.md
+content.md
