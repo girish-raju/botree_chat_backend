@@ -1,0 +1,44 @@
+name: Deploy backend to Oracle VM
+
+# Auto-deploys the FastAPI backend to the Oracle Cloud Always-Free VM on every
+# push to main. The VM already has: the repo cloned at ~/botree_chat_backend,
+# a filled-in .env (real secrets, NOT in git), the Bisk Farm SSH key at
+# ~/.ssh/aasim.niazi, Docker + docker compose installed.
+#
+# Requires these GitHub repo secrets:
+#   DEPLOY_HOST      - the VM's public IP or hostname
+#   DEPLOY_USER      - SSH user on the VM (e.g. ubuntu / opc)
+#   DEPLOY_SSH_KEY   - a PRIVATE SSH key whose public half is in the VM's
+#                      ~/.ssh/authorized_keys (a dedicated deploy key)
+#   DEPLOY_PORT      - (optional) SSH port, defaults to 22
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          command_timeout: 20m
+          script: |
+            set -e
+            cd ~/botree_chat_backend
+            git fetch --all
+            git reset --hard origin/main
+            docker compose -f docker-compose.prod.yml up -d --build
+            # Apply DB migrations (safe/idempotent) against Neon
+            docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head
+            docker image prune -f
+            echo "Deploy complete."
