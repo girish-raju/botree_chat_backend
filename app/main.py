@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -30,40 +28,15 @@ from app.tasks.sweeper import start_sweeper, stop_sweeper
 logger = structlog.get_logger(__name__)
 
 
-def _materialize_ssh_key(settings) -> None:
-    """Write the SSH private key from a base64 env var to a file, if provided.
-
-    Managed hosts (Railway/Render) only support env vars, not files, so the
-    Bisk Farm SSH key is supplied as SSH_KEY_B64 and written to SSH_KEY_PATH
-    here on startup. No-op when the key file already exists or B64 is unset.
-    """
-    if not (settings.ssh_key_b64 and settings.ssh_key_path):
-        return
-    if os.path.exists(settings.ssh_key_path):
-        return
-    try:
-        data = base64.b64decode(settings.ssh_key_b64)
-        parent = os.path.dirname(settings.ssh_key_path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(settings.ssh_key_path, "wb") as fh:
-            fh.write(data)
-        os.chmod(settings.ssh_key_path, 0o600)
-        logger.info("ssh_key_materialized", path=settings.ssh_key_path)
-    except Exception:
-        logger.warning("ssh_key_materialize_failed", exc_info=True)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan hook.
 
-    Initializes the Postgres connection pool and the MySQL/SSH tunnel manager
+    Initializes the Postgres connection pool and the MySQL analytics connector
     on startup, registers their readiness probes, and warms up the Cloudflare-API
     embedder — tearing them all down on shutdown.
     """
     settings = get_settings()
-    _materialize_ssh_key(settings)
     init_engine(settings)
     readiness_probes["postgres"] = postgres_ready
 

@@ -1,4 +1,4 @@
-"""MySQL analytics access layer, optionally reached through an SSH tunnel.
+"""MySQL analytics access layer, reached through an SSH tunnel when configured.
 
 `init_analytics` / `dispose_analytics` are called from the FastAPI lifespan
 (see `app/main.py`), mirroring `app/db/postgres.py`. Everything is lazy: no
@@ -6,11 +6,16 @@ network connection (SSH or MySQL) is attempted until the first query, so the
 app can boot even when the analytics host is unreachable. `analytics_ready`
 (the `AnalyticsDB.ready` bound method) is registered into
 `app.api.health.readiness_probes` as the "mysql" check.
+
+SSH handling mirrors the original conversational bot: if `SSH_HOST` is set,
+a single lazily-started tunnel (key + optional passphrase, keepalive) is
+reused while alive and restarted if it dies; if `SSH_HOST` is empty, pymysql
+connects to `MYSQL_HOST:MYSQL_PORT` directly. There is no separate
+enable/disable flag.
 """
 
 from __future__ import annotations
 
-import socket
 import threading
 import time
 from dataclasses import dataclass, field
@@ -53,10 +58,13 @@ class QueryResult:
 
 @dataclass
 class SSHTunnelManager:
-    """Wraps `sshtunnel.SSHTunnelForwarder`, lazily starting it on demand.
+    """Lazily starts a single `sshtunnel.SSHTunnelForwarder` on demand.
 
-    Only active if `settings.ssh_tunnel_enabled`; otherwise `ensure_started`
-    hands back the MySQL host/port directly with no tunnel involved.
+    Active whenever `settings.ssh_host` is set: the tunnel is started on the
+    first call, reused while alive, and restarted if it has died — the same
+    pattern as `start_ssh_tunnel()` in the original conversational bot. When
+    no SSH host is configured, `ensure_started` hands back the MySQL
+    host/port directly with no tunnel involved.
     """
 
     settings: Settings
@@ -75,33 +83,9 @@ class SSHTunnelManager:
         except Exception:
             return False
 
-    def _precheck_reachable(self) -> None:
-        """Fail fast if the SSH bastion's TCP port is not reachable.
-
-        Without this, an unreachable or firewalled bastion (e.g. the managed
-        host's egress IP isn't allow-listed) makes the forwarder hang on the
-        OS-default TCP connect timeout (~45-90s), stalling the request until
-        the client disconnects. A short explicit connect attempt turns that
-        into a clean, quick error the pipeline can surface.
-        """
-        settings = self.settings
-        timeout = max(1, settings.ssh_connect_timeout_s)
-        try:
-            with socket.create_connection(
-                (settings.ssh_host, settings.ssh_port), timeout=timeout
-            ):
-                return
-        except OSError as exc:
-            raise OSError(
-                f"SSH bastion {settings.ssh_host}:{settings.ssh_port} is not "
-                f"reachable within {timeout}s ({exc}). If this host is behind "
-                f"an IP allow-list, the deployment's outbound IP must be "
-                f"added to it."
-            ) from exc
-
     def _start_forwarder(self) -> SSHTunnelForwarder:
         settings = self.settings
-        self._precheck_reachable()
+        logger.info("ssh_tunnel_starting", ssh_host=settings.ssh_host)
         forwarder = SSHTunnelForwarder(
             (settings.ssh_host, settings.ssh_port),
             ssh_username=settings.ssh_user,
@@ -109,6 +93,7 @@ class SSHTunnelManager:
             ssh_private_key_password=settings.ssh_key_password or None,
             remote_bind_address=(settings.mysql_host, settings.mysql_port),
             local_bind_address=("127.0.0.1", 0),
+            set_keepalive=10,
         )
         forwarder.start()
         logger.info(
@@ -121,11 +106,11 @@ class SSHTunnelManager:
     def ensure_started(self) -> tuple[str, int]:
         """Return the (host, port) MySQL should connect to.
 
-        If the tunnel is enabled, lazily starts the forwarder on first call
-        and restarts it if a previously-started tunnel has died. If disabled,
+        If `ssh_host` is configured, lazily starts the forwarder on first
+        call and restarts it if a previously-started tunnel has died. If not,
         returns the configured MySQL host/port unchanged.
         """
-        if not self.settings.ssh_tunnel_enabled:
+        if not self.settings.ssh_host:
             return self.settings.mysql_host, self.settings.mysql_port
 
         with self._lock:
@@ -203,7 +188,7 @@ class AnalyticsDB:
         """
         try:
             return self._execute_once(sql, timeout_s)
-        except (pymysql.err.OperationalError, OSError, socket.error) as exc:
+        except (pymysql.err.OperationalError, OSError) as exc:
             if not self._is_dead_connection_error(exc):
                 raise
             logger.warning("analytics_connection_dead_retrying", error=str(exc))
@@ -216,7 +201,7 @@ class AnalyticsDB:
             code = exc.args[0] if exc.args else None
             if code in _DEAD_CONNECTION_ERROR_CODES:
                 return True
-        return isinstance(exc, (OSError, socket.error))
+        return isinstance(exc, OSError)
 
     def _execute_once(self, sql: str, timeout_s: int) -> QueryResult:
         pool = self._ensure_pool()

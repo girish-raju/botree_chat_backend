@@ -2,8 +2,8 @@
 
 `readiness_probes` is a small registry that later phases populate (e.g. a
 "postgres" probe that pings the connection pool, a "mysql" probe that checks
-the analytics connector / SSH tunnel). `/readyz` runs every registered probe
-and reports pass/fail per check.
+the analytics connector). `/readyz` runs every registered probe and reports
+pass/fail per check.
 """
 
 from __future__ import annotations

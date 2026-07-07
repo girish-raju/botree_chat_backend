@@ -10,7 +10,7 @@ dev loop once you're up and running.
 - **Docker** (for the Postgres + pgvector container via `docker-compose.yml`).
 - An **SSH private key** for the Bisk Farm MySQL analytics host — only
   required if you need live analytics data; the app boots and serves chat
-  threads/auth without it (see "The MySQL SSH key" below).
+  threads/auth without it (see "MySQL analytics access" below).
 - (Optional) An Anthropic API key and/or Cloudflare Workers AI account, if
   you'll exercise the real LLM path rather than mocked tests.
 
@@ -75,11 +75,11 @@ Then edit `.env`. Every variable, grouped as in `.env.example`:
 - `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE`
 - `MYSQL_QUERY_TIMEOUT_S` — max seconds a generated query may run (default 15).
 
-**SSH Tunnel** (only needed if the MySQL host is reached through a bastion)
-- `SSH_TUNNEL_ENABLED` — `true`/`false`.
-- `SSH_HOST`, `SSH_PORT`, `SSH_USER`
-- `SSH_KEY_PATH` — path to the private key **on this machine**. See the
-  gotcha below.
+**SSH Tunnel** (used automatically whenever `SSH_HOST` is set)
+- `SSH_HOST` — SSH host for the tunnel; leave empty to connect to
+  `MYSQL_HOST` directly. There is no separate enable/disable flag.
+- `SSH_PORT`, `SSH_USER`
+- `SSH_KEY_PATH` — path to the private key **on this machine**.
 - `SSH_KEY_PASSWORD` — passphrase, if the key has one.
 
 **Cache**
@@ -317,12 +317,17 @@ Make sure the corresponding credentials (`ANTHROPIC_API_KEY` or
 provider you pick. This deployment's default is `cloudflare` (Llama 3.1) —
 see the comment above `LLM_PROVIDER` in your `.env`.
 
-## The MySQL SSH-key gotcha
+## MySQL analytics access
 
-The analytics MySQL host is reached through an SSH bastion
-(`SSH_TUNNEL_ENABLED=true`). The private key path in an inherited/old `.env`
-may point at a Windows path (e.g. `D:\Botree\...\id_rsa`) from whoever set it
-up previously — that path won't exist on your machine. To fix:
+The analytics MySQL host is reached through an SSH tunnel whenever
+`SSH_HOST` is set in `.env` — the tunnel starts lazily on the first query,
+is kept alive (keepalive every 10s), and restarts automatically if it dies.
+Leave `SSH_HOST` empty to connect to `MYSQL_HOST` directly (e.g. the local
+docker-compose MySQL).
+
+The private key path in an inherited/old `.env` may point at a Windows path
+(e.g. `D:\Botree\...\id_rsa`) from whoever set it up previously — that path
+won't exist on your machine. To fix:
 
 1. Get the private key file (`aasim.niazi` or equivalent) onto this machine,
    e.g. `~/.ssh/aasim.niazi`.

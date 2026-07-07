@@ -23,8 +23,7 @@ def _settings(**overrides: object) -> Settings:
         "mysql_password": "p",
         "mysql_database": "analytics",
         "mysql_query_timeout_s": 15,
-        "ssh_tunnel_enabled": False,
-        "ssh_host": "bastion.internal",
+        "ssh_host": "",
         "ssh_port": 22,
         "ssh_user": "sshuser",
         "ssh_key_path": "/tmp/does-not-exist.pem",
@@ -37,8 +36,8 @@ def _settings(**overrides: object) -> Settings:
 # --- SSHTunnelManager -------------------------------------------------------
 
 
-def test_tunnel_disabled_returns_mysql_host_directly() -> None:
-    settings = _settings(ssh_tunnel_enabled=False)
+def test_no_ssh_host_returns_mysql_host_directly() -> None:
+    settings = _settings(ssh_host="")
     manager = SSHTunnelManager(settings)
 
     with patch("app.db.analytics.SSHTunnelForwarder") as mock_forwarder_cls:
@@ -48,8 +47,8 @@ def test_tunnel_disabled_returns_mysql_host_directly() -> None:
     mock_forwarder_cls.assert_not_called()
 
 
-def test_tunnel_enabled_lazy_starts_once() -> None:
-    settings = _settings(ssh_tunnel_enabled=True)
+def test_ssh_host_set_lazy_starts_tunnel_once() -> None:
+    settings = _settings(ssh_host="bastion.internal")
     manager = SSHTunnelManager(settings)
 
     mock_instance = MagicMock()
@@ -57,10 +56,9 @@ def test_tunnel_enabled_lazy_starts_once() -> None:
     mock_instance.ssh_transport.is_active.return_value = True
     mock_instance.local_bind_port = 54321
 
-    with (
-        patch("app.db.analytics.SSHTunnelForwarder", return_value=mock_instance) as mock_cls,
-        patch.object(SSHTunnelManager, "_precheck_reachable"),
-    ):
+    with patch(
+        "app.db.analytics.SSHTunnelForwarder", return_value=mock_instance
+    ) as mock_cls:
         host1, port1 = manager.ensure_started()
         host2, port2 = manager.ensure_started()
 
@@ -71,7 +69,7 @@ def test_tunnel_enabled_lazy_starts_once() -> None:
 
 
 def test_tunnel_restarts_when_dead() -> None:
-    settings = _settings(ssh_tunnel_enabled=True)
+    settings = _settings(ssh_host="bastion.internal")
     manager = SSHTunnelManager(settings)
 
     dead_instance = MagicMock()
@@ -83,13 +81,10 @@ def test_tunnel_restarts_when_dead() -> None:
     alive_instance.ssh_transport.is_active.return_value = True
     alive_instance.local_bind_port = 22222
 
-    with (
-        patch(
-            "app.db.analytics.SSHTunnelForwarder",
-            side_effect=[dead_instance, alive_instance],
-        ) as mock_cls,
-        patch.object(SSHTunnelManager, "_precheck_reachable"),
-    ):
+    with patch(
+        "app.db.analytics.SSHTunnelForwarder",
+        side_effect=[dead_instance, alive_instance],
+    ) as mock_cls:
         host1, port1 = manager.ensure_started()
         # Simulate the tunnel dying between calls.
         dead_instance.is_active = False
@@ -141,7 +136,7 @@ class _FakeConnection:
 
 
 def _analytics_with_fake_pool(rows: list[dict], columns: list[str]) -> tuple[AnalyticsDB, list[str]]:
-    settings = _settings(ssh_tunnel_enabled=False)
+    settings = _settings()
     db = AnalyticsDB(settings)
 
     executed: list[str] = []
@@ -182,7 +177,7 @@ def test_execute_readonly_sync_ignores_set_session_failure() -> None:
 
 
 def test_execute_readonly_sync_retries_once_on_dead_connection() -> None:
-    settings = _settings(ssh_tunnel_enabled=False)
+    settings = _settings()
     db = AnalyticsDB(settings)
 
     good_rows = [{"ok": 1}]
@@ -230,7 +225,7 @@ async def test_ready_true_when_query_succeeds() -> None:
 
 
 async def test_ready_false_when_query_raises() -> None:
-    settings = _settings(ssh_tunnel_enabled=False)
+    settings = _settings()
     db = AnalyticsDB(settings)
 
     def _raise(*args: object, **kwargs: object) -> None:
