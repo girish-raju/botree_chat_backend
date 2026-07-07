@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     cloudflare_model: str = "@cf/meta/llama-3.1-8b-instruct"
     # Embeddings run via the Cloudflare API (same BGE model, no local download).
     cloudflare_embedding_model: str = "@cf/baai/bge-small-en-v1.5"
+    # Speech-to-text for voice input (POST /api/transcribe).
+    cloudflare_whisper_model: str = "@cf/openai/whisper-large-v3-turbo"
 
     # MySQL analytics
     mysql_host: str = "127.0.0.1"

@@ -17,6 +17,7 @@ from app.api.chat import router as chat_router
 from app.api.health import readiness_probes
 from app.api.health import router as health_router
 from app.api.threads import router as threads_router
+from app.api.transcribe import router as transcribe_router
 from app.cache.embeddings import dispose_embedder, get_embedder, init_embedder
 from app.config import get_settings
 from app.db.analytics import dispose_analytics, get_analytics, init_analytics
@@ -108,6 +109,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(threads_router)
     app.include_router(chat_router)
+    app.include_router(transcribe_router)
 
     return app
 
