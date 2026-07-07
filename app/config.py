@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -54,12 +55,25 @@ class Settings(BaseSettings):
     # Speech-to-text for voice input (POST /api/transcribe).
     cloudflare_whisper_model: str = "@cf/openai/whisper-large-v3-turbo"
 
-    # MySQL analytics
-    mysql_host: str = "127.0.0.1"
-    mysql_port: int = 3306
-    mysql_user: str = ""
-    mysql_password: str = ""
-    mysql_database: str = ""
+    # MySQL analytics. Each field also accepts the DB_* names used by the
+    # original conversational bots' .env (DB_HOST, DB_PORT, DB_NAME, ...), so
+    # the backend runs against the AWS server's pre-existing env file as-is.
+    # When both names are set, the MYSQL_* name wins.
+    mysql_host: str = Field(
+        default="127.0.0.1", validation_alias=AliasChoices("mysql_host", "db_host")
+    )
+    mysql_port: int = Field(
+        default=3306, validation_alias=AliasChoices("mysql_port", "db_port")
+    )
+    mysql_user: str = Field(
+        default="", validation_alias=AliasChoices("mysql_user", "db_user")
+    )
+    mysql_password: str = Field(
+        default="", validation_alias=AliasChoices("mysql_password", "db_password")
+    )
+    mysql_database: str = Field(
+        default="", validation_alias=AliasChoices("mysql_database", "db_name")
+    )
     mysql_query_timeout_s: int = 15
 
     # SSH tunnel. If ssh_host is set, MySQL connections go through a lazily
