@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     pg_dsn: str = "postgresql+asyncpg://botree:botree@localhost:5432/botree_chat"
 
     # LLM
-    llm_provider: str = "anthropic"  # anthropic | cloudflare
+    llm_provider: str = "anthropic"  # anthropic | cloudflare | bedrock
 
     # Anthropic
     anthropic_api_key: str = ""
@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     # Speech-to-text for voice input (POST /api/transcribe).
     cloudflare_whisper_model: str = "@cf/openai/whisper-large-v3-turbo"
 
+    # Amazon Bedrock (OpenAI-compatible endpoint). Auth is a bearer token:
+    # either a Bedrock API key, or — when that's empty — one auto-generated
+    # from plain IAM keys via aws-bedrock-token-generator (offline presigning).
+    bedrock_api_key: str = ""
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    bedrock_region: str = "ap-south-1"
+    bedrock_model: str = "openai.gpt-oss-20b-1:0"
+
     # MySQL analytics. Each field also accepts the DB_* names used by the
     # original conversational bots' .env (DB_HOST, DB_PORT, DB_NAME, ...), so
     # the backend runs against the AWS server's pre-existing env file as-is.
@@ -62,12 +71,8 @@ class Settings(BaseSettings):
     mysql_host: str = Field(
         default="127.0.0.1", validation_alias=AliasChoices("mysql_host", "db_host")
     )
-    mysql_port: int = Field(
-        default=3306, validation_alias=AliasChoices("mysql_port", "db_port")
-    )
-    mysql_user: str = Field(
-        default="", validation_alias=AliasChoices("mysql_user", "db_user")
-    )
+    mysql_port: int = Field(default=3306, validation_alias=AliasChoices("mysql_port", "db_port"))
+    mysql_user: str = Field(default="", validation_alias=AliasChoices("mysql_user", "db_user"))
     mysql_password: str = Field(
         default="", validation_alias=AliasChoices("mysql_password", "db_password")
     )

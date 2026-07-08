@@ -5,9 +5,10 @@ from __future__ import annotations
 from app.config import Settings, get_settings
 from app.llm.anthropic_provider import AnthropicProvider
 from app.llm.base import LLMProvider
+from app.llm.bedrock_provider import BedrockProvider
 from app.llm.cloudflare_provider import CloudflareProvider
 
-_VALID_PROVIDERS = ("anthropic", "cloudflare")
+_VALID_PROVIDERS = ("anthropic", "cloudflare", "bedrock")
 
 _provider: LLMProvider | None = None
 
@@ -17,6 +18,8 @@ def _build_provider(settings: Settings) -> LLMProvider:
         return AnthropicProvider(settings)
     if settings.llm_provider == "cloudflare":
         return CloudflareProvider(settings)
+    if settings.llm_provider == "bedrock":
+        return BedrockProvider(settings)
     raise ValueError(
         f"Unknown llm_provider {settings.llm_provider!r}; valid options are: "
         f"{', '.join(_VALID_PROVIDERS)}"

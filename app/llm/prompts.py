@@ -219,6 +219,10 @@ Respond with STRICT JSON only, no markdown fences, no commentary, in exactly thi
 
 CLOUDFLARE_SQL_PROMPT: str = _build_cloudflare_sql_prompt()
 
+# Provider-neutral alias: the same strict-JSON prompt suits any small
+# OpenAI-compatible model (Bedrock gpt-oss, etc.), not just Cloudflare.
+STRICT_JSON_SQL_PROMPT: str = CLOUDFLARE_SQL_PROMPT
+
 
 __all__ = [
     "build_static_system_block",
@@ -229,4 +233,5 @@ __all__ = [
     "render_sample_rows",
     "TITLE_PROMPT",
     "CLOUDFLARE_SQL_PROMPT",
+    "STRICT_JSON_SQL_PROMPT",
 ]

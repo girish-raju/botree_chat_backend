@@ -21,6 +21,7 @@ dependencies = [
     "sshtunnel",
     "sqlglot>=25",
     "anthropic",
+    "aws-bedrock-token-generator",
     "httpx",
     "pyjwt",
     "bcrypt",
