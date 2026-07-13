@@ -29,6 +29,7 @@ dependencies = [
     "structlog",
     "python-multipart",
     "anyio",
+    "fpdf2",
 ]
 
 [project.optional-dependencies]

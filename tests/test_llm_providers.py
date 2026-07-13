@@ -35,6 +35,9 @@ def _settings(**overrides) -> Settings:
         cloudflare_api_token="tok123",
         cloudflare_model="@cf/meta/llama-3.1-8b-instruct",
         bedrock_api_key="bedrock-test-key",
+        # Pin explicitly: Settings still reads .env, and a developer's
+        # BEDROCK_MODEL override would otherwise leak into assertions.
+        bedrock_model="openai.gpt-oss-20b-1:0",
     )
     base.update(overrides)
     return Settings(**base)
@@ -930,3 +933,89 @@ async def test_bedrock_rewrite_and_title_trimmed():
     assert rewritten == "What about Q2?"
     assert "\n" not in title
     assert title == "Q2 Revenue Summary"
+
+
+# ---------------------------------------------------------------------------
+# Follow-up suggestions
+# ---------------------------------------------------------------------------
+
+
+def test_parse_suggestion_list_clean_array():
+    from app.llm.base import parse_suggestion_list
+
+    assert parse_suggestion_list('["Month wise", "Region wise"]') == [
+        "Month wise",
+        "Region wise",
+    ]
+
+
+def test_parse_suggestion_list_tolerates_fences_and_prose():
+    from app.llm.base import parse_suggestion_list
+
+    text = 'Here you go:\n```json\n["Top 10 products", "Compare with last year"]\n```'
+    assert parse_suggestion_list(text) == ["Top 10 products", "Compare with last year"]
+
+
+def test_parse_suggestion_list_caps_dedupes_and_strips_markers():
+    from app.llm.base import parse_suggestion_list
+
+    text = '["1. Month wise", "- Month Wise", "Region wise", "Top 10", "Week wise"]'
+    # marker stripped, case-insensitive dupe dropped, capped at 3
+    assert parse_suggestion_list(text) == ["Month wise", "Region wise", "Top 10"]
+
+
+def test_parse_suggestion_list_garbage_returns_empty():
+    from app.llm.base import parse_suggestion_list
+
+    assert parse_suggestion_list("") == []
+    assert parse_suggestion_list("I have no suggestions for you.") == []
+    assert parse_suggestion_list('{"mode": "db"}') == []
+    assert parse_suggestion_list('[1, 2, {"a": 1}]') == []
+    assert parse_suggestion_list("[unclosed") == []
+
+
+@pytest.mark.asyncio
+async def test_anthropic_suggest_followups_parses_array():
+    response = _response([_text_block('["Month wise sales", "Region wise sales"]')])
+    client = _fake_anthropic_client([response])
+    provider = AnthropicProvider(_settings(), client=client)
+
+    items = await provider.suggest_followups("total sales this year", ["TotalSales"], 1)
+
+    assert items == ["Month wise sales", "Region wise sales"]
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_suggest_followups_parses_array():
+    client = MagicMock()
+    client.post = AsyncMock(
+        return_value=_cf_response({"result": {"response": '["Month wise sales"]'}})
+    )
+    provider = CloudflareProvider(_settings(llm_provider="cloudflare"), client=client)
+
+    items = await provider.suggest_followups("total sales this year", ["TotalSales"], 1)
+
+    assert items == ["Month wise sales"]
+
+
+@pytest.mark.asyncio
+async def test_bedrock_suggest_followups_parses_array_and_strips_reasoning():
+    client = MagicMock()
+    content = '<reasoning>thinking...</reasoning>["Month wise sales", "Top 10 products"]'
+    client.post = AsyncMock(return_value=_cf_response(_oai_body(content)))
+    provider = _bedrock_provider(client)
+
+    items = await provider.suggest_followups("total sales this year", ["TotalSales"], 1)
+
+    assert items == ["Month wise sales", "Top 10 products"]
+
+
+@pytest.mark.asyncio
+async def test_bedrock_suggest_followups_junk_reply_yields_empty():
+    client = MagicMock()
+    client.post = AsyncMock(return_value=_cf_response(_oai_body("no suggestions, sorry")))
+    provider = _bedrock_provider(client)
+
+    items = await provider.suggest_followups("hello there", [], 0)
+
+    assert items == []

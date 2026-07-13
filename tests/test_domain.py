@@ -231,3 +231,61 @@ def test_cloudflare_prompt_includes_user_scope_guidance():
     lowered = CLOUDFLARE_SQL_PROMPT.lower()
     assert "my zone" in lowered
     assert "automatically" in lowered
+
+
+def test_sql_rules_include_human_readable_guidance():
+    """Regression: 'no of outlets…' once returned 50 raw unlabeled numbers.
+    Rule 20 must demand ONE aggregated row, month names, and 'Unknown' labels."""
+    lowered = SQL_RULES.lower()
+    assert "one aggregated row" in lowered
+    assert "'%m %y'" in lowered
+    assert "coalesce(nullif" in lowered
+    assert "no_of_ordered_outlets_without_to" in lowered
+
+
+def test_sql_rules_region_only_in_dimension_tables():
+    """Regression: 'region wise' grouped a fact table by State with NULL data
+    because rule 3 claimed geo columns exist on every table."""
+    lowered = SQL_RULES.lower()
+    assert "geo_hier3_name" in lowered
+    assert "only in distributor_t" in lowered
+
+
+def test_cloudflare_prompt_includes_human_readable_guidance():
+    """The ACTIVE Bedrock/Cloudflare condensed prompt must carry the same
+    human-readable-output rules — it is the only prompt those providers see."""
+    from app.llm.prompts import CLOUDFLARE_SQL_PROMPT
+
+    lowered = CLOUDFLARE_SQL_PROMPT.lower()
+    assert "one aggregated row" in lowered
+    assert "'%m %y'" in lowered
+    assert "coalesce(nullif" in lowered
+    assert "no_of_ordered_outlets_without_to" in lowered
+    assert "only in distributor_t" in lowered
+
+
+def test_condensed_few_shots_reference_only_whitelisted_tables():
+    from app.domain.sql_rules import CONDENSED_FEW_SHOT_EXAMPLES
+
+    assert len(CONDENSED_FEW_SHOT_EXAMPLES) >= 5
+    for example in CONDENSED_FEW_SHOT_EXAMPLES:
+        sql = example["sql"]
+        referenced = {table for table in INCLUDE_TABLES if table in sql}
+        assert referenced, f"No whitelisted table referenced in: {sql}"
+
+
+def test_few_shots_include_month_name_pattern():
+    assert any(
+        "DATE_FORMAT" in ex["sql"] and "'%M %Y'" in ex["sql"]
+        for ex in FEW_SHOT_EXAMPLES
+    )
+
+
+def test_render_sample_rows_none_renders_blank():
+    """A NULL cell must reach the answer LLM as '(blank)', never Python 'None'
+    (a literal None made the model hallucinate a region name)."""
+    from app.llm.prompts import render_sample_rows
+
+    out = render_sample_rows([{"Region": None, "Total": 5}], ["Region", "Total"])
+    assert "(blank)" in out
+    assert "None" not in out

@@ -1,18 +1,19 @@
 """SQL generation rules and few-shot examples for the NL→SQL prompt.
 
-Ported from the `generate_query_plan` prompt in `conversational_bot_v15.py`
-(~lines 1265-1577): the 18 numbered "CRITICAL RULES" plus the block of
-"Example correct SQL" pairs. Rule content is kept verbatim; only light
-re-formatting (indentation, wrapping) was applied for readability as a
-Python string constant.
+Originally ported from the `generate_query_plan` prompt in
+`conversational_bot_v15.py` (~lines 1265-1577) and since extended: 20
+numbered "CRITICAL RULES" plus the block of "Example correct SQL" pairs.
+Rule 20 (human-readable results) and the coverage/region guidance were
+added after real-world misfires — see the rules themselves.
 """
 
 from __future__ import annotations
 
-#: The 18 hard rules the SQL-generation prompt must include, verbatim from
-#: the prototype (alias conventions, join keys, revenue-column mapping,
-#: counting rules, date/MTD/YTD handling via CURDATE(), Pareto, state-name
-#: mapping, fact-table isolation, coverage/purchase/route-plan nuances).
+#: The 20 hard rules the SQL-generation prompt must include (alias
+#: conventions, join keys, revenue-column mapping, counting rules,
+#: date/MTD/YTD handling via CURDATE(), Pareto, state-name mapping,
+#: fact-table isolation, coverage/purchase/route-plan nuances, and
+#: human-readable result shaping).
 SQL_RULES: str = """### CRITICAL RULES (NEVER break these):
 1. TABLE ALIASES — always use exactly:
    distributor_t            → d
@@ -34,12 +35,20 @@ SQL_RULES: str = """### CRITICAL RULES (NEVER break these):
    salesman_t.code          = rpt_invoice_summary_t.salesman_code
    salesman_t.code          = rpt_order_summary_t.salesman_code
 
-3. GEOGRAPHY COLUMNS (same across all tables):
+3. GEOGRAPHY COLUMNS:
    geo_hier2_name = Zone    (SOUTH, EAST, NORTH-EAST)
-   geo_hier3_name = Region  (REGION 1, REGION 6)
+   geo_hier3_name = Region  (REGION 1, REGION 6) — EXISTS ONLY in distributor_t
+                    and salesman_t. NO fact table (invoice, order, purchase,
+                    coverage, route plan) has geo_hier3_name.
    geo_hier4_name = State   (TAMILNADU STATE, WB STATE, ANDHRA PRADESH STATE, JHARKHAND STATE)
    geo_hier6_name = District (TIRUCHIRAPPALLI District, CHENNAI District)
    geo_hier7_name = Town    (Trichy Town, Chennai Town)
+   Zone/State/District/Town exist on every fact table; Region does NOT.
+   "Region wise" on a fact table => JOIN distributor_t:
+     SELECT COALESCE(NULLIF(d.geo_hier3_name,''),'Unknown') AS Region, ...
+     FROM <fact> f JOIN distributor_t d ON f.distributor_code = d.code
+     GROUP BY COALESCE(NULLIF(d.geo_hier3_name,''),'Unknown')
+   NEVER alias geo_hier4_name (State) or any other column as Region.
 
 4. SALES HIERARCHY COLUMNS (same across all tables):
    sales_hier1_name = VP / HEAD OF SALES
@@ -154,6 +163,16 @@ SQL_RULES: str = """### CRITICAL RULES (NEVER break these):
         ROUND(SUM(no_of_actual_outlets) / NULLIF(SUM(no_of_planned_outlets),0) * 100, 2)
     - For raw activity, SUM the count columns (no_of_planned_outlets, no_of_actual_outlets).
     - This table is per salesman-route-DAY, so always consider a date filter.
+    - COLUMN MEANINGS — never confuse these three:
+        no_of_outlet_not_visited         = PLANNED outlets the salesman did NOT visit
+        no_of_ordered_outlets_with_TO    = visited outlets that DID place an order
+        no_of_ordered_outlets_without_TO = visited outlets that did NOT place an order
+      "outlets not visited"                           => SUM(cov.no_of_outlet_not_visited)
+      "outlets that did not order / have not ordered" => SUM(cov.no_of_ordered_outlets_without_TO)
+      "outlets visited"                               => SUM(cov.no_of_actual_outlets)
+    - "How many / no of outlets ..." on this table => ONE row:
+      SELECT SUM(<count_col>) AS <ClearAlias> with a coverage_date range.
+      NEVER select the raw per-day column and return 50 unlabeled numbers.
 
 17. PURCHASE (rpt_purchase_summary_t):
     - It has NO salesman_code — never group purchases by salesman.
@@ -182,7 +201,28 @@ SQL_RULES: str = """### CRITICAL RULES (NEVER break these):
     - Only add a geo/hierarchy filter when the user names a REAL place
       (e.g. "in Chennai", "Tamil Nadu", "South zone") — see rules 3 and 12.
     - NEVER switch to a conversational answer to ask who the user is or for a
-      distributor/role code — the scope is already known to the system."""
+      distributor/role code — the scope is already known to the system.
+
+20. HUMAN-READABLE RESULTS — every result must read like a small business report:
+    a) "how many", "no of", "count of", "total X" => return ONE aggregated row
+       (SUM/COUNT with a clear alias like OutletsNotVisited, TotalSales).
+       NEVER return a raw column dump of per-row values.
+       Single-total SUMs must be wrapped COALESCE(SUM(x),0) so an empty
+       period answers 0, never NULL.
+    b) Every multi-row result MUST include at least one descriptive label column
+       (a name, month, or place) with a plain-English alias (AS Region, AS Month,
+       AS Salesman). Never return metric columns alone, and never expose raw
+       column names like measure_14 as result headers — always alias them.
+    c) Month-wise / monthly breakdowns => label with month NAMES:
+       DATE_FORMAT(<date_col>, '%M %Y') AS Month,
+       GROUP BY DATE_FORMAT(<date_col>, '%M %Y'), ORDER BY MIN(<date_col>)
+       so months appear chronologically (January 2026, February 2026, ...).
+       Date columns: invoice_date (invoice), order_date (order),
+       cmp_invoice_date (purchase), coverage_date (coverage).
+       Never show raw month numbers or full dates as the month label.
+    d) Grouped label columns must never show blank: wrap them as
+       COALESCE(NULLIF(<label>,''),'Unknown') AS <Alias> and GROUP BY the same
+       expression. Never drop rows just because the label is missing."""
 
 
 #: Question → SQL few-shot pairs, ported verbatim from the "Example correct
@@ -276,4 +316,48 @@ FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
         "question": "what is my mtd sales (single total, NO grouping, NO invented filter)",
         "sql": "SELECT SUM(inv.measure_14) AS MTDRevenue FROM rpt_invoice_summary_t inv WHERE inv.invoice_date >= DATE_FORMAT(CURDATE(),'%Y-%m-01') AND inv.invoice_date <= CURDATE()",
     },
+    {
+        "question": "Month wise sales for this year (month NAMES, chronological)",
+        "sql": "SELECT DATE_FORMAT(inv.invoice_date, '%M %Y') AS Month, SUM(inv.measure_14) AS TotalSales FROM rpt_invoice_summary_t inv WHERE YEAR(inv.invoice_date) = YEAR(CURDATE()) GROUP BY DATE_FORMAT(inv.invoice_date, '%M %Y') ORDER BY MIN(inv.invoice_date) LIMIT 12",
+    },
+    {
+        "question": "No of outlets in my route not visited in last 45 days (ONE total; my route = automatic scope, no filter)",
+        "sql": "SELECT COALESCE(SUM(cov.no_of_outlet_not_visited),0) AS OutletsNotVisited FROM rpt_coverage_productivity_t cov WHERE cov.coverage_date >= DATE_SUB(CURDATE(), INTERVAL 45 DAY) AND cov.coverage_date <= CURDATE()",
+    },
+    {
+        "question": "No of outlets in my route that have not ordered in last 45 days (visited but no order => without_TO, ONE total)",
+        "sql": "SELECT COALESCE(SUM(cov.no_of_ordered_outlets_without_TO),0) AS OutletsWithNoOrder FROM rpt_coverage_productivity_t cov WHERE cov.coverage_date >= DATE_SUB(CURDATE(), INTERVAL 45 DAY) AND cov.coverage_date <= CURDATE()",
+    },
+    {
+        "question": "Region wise sales (Region lives ONLY in distributor_t — JOIN it, no blank labels)",
+        "sql": "SELECT COALESCE(NULLIF(d.geo_hier3_name,''),'Unknown') AS Region, SUM(inv.measure_14) AS TotalSales FROM rpt_invoice_summary_t inv JOIN distributor_t d ON inv.distributor_code = d.code GROUP BY COALESCE(NULLIF(d.geo_hier3_name,''),'Unknown') ORDER BY TotalSales DESC LIMIT 10",
+    },
+    {
+        "question": "Region wise outlets that did not order in last 45 days",
+        "sql": "SELECT COALESCE(NULLIF(d.geo_hier3_name,''),'Unknown') AS Region, SUM(cov.no_of_ordered_outlets_without_TO) AS OutletsWithNoOrder FROM rpt_coverage_productivity_t cov JOIN distributor_t d ON cov.distributor_code = d.code WHERE cov.coverage_date >= DATE_SUB(CURDATE(), INTERVAL 45 DAY) AND cov.coverage_date <= CURDATE() GROUP BY COALESCE(NULLIF(d.geo_hier3_name,''),'Unknown') ORDER BY OutletsWithNoOrder DESC LIMIT 20",
+    },
+]
+
+
+def _example(question_prefix: str) -> dict[str, str]:
+    """Look up a few-shot by question prefix; fails loudly if it drifts."""
+    for example in FEW_SHOT_EXAMPLES:
+        if example["question"].startswith(question_prefix):
+            return example
+    raise LookupError(f"no few-shot example starting with {question_prefix!r}")
+
+
+#: Hand-picked subset for the condensed strict-JSON prompt (Bedrock/Cloudflare
+#: small models) — the ONLY few-shot signal those providers see. Keep it short:
+#: core label+metric patterns plus the human-readable examples (months, single
+#: totals, region-wise via distributor_t).
+CONDENSED_FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
+    _example("Distributor count by state"),
+    _example("Top products by invoice revenue in a state"),
+    _example("MTD total invoice revenue (single number)"),
+    _example("Month wise sales for this year"),
+    _example("No of outlets in my route not visited in last 45 days"),
+    _example("No of outlets in my route that have not ordered in last 45 days"),
+    _example("Region wise sales"),
+    _example("Region wise outlets that did not order in last 45 days"),
 ]

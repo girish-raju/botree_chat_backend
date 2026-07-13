@@ -18,11 +18,12 @@ import httpx
 
 from app.config import Settings
 from app.errors import UpstreamLLMError
-from app.llm.base import SQLPlan, Turn, ValidateHook
+from app.llm.base import SQLPlan, Turn, ValidateHook, parse_suggestion_list
 from app.llm.prompts import (
     ANSWER_PROMPT,
     CLOUDFLARE_SQL_PROMPT,
     REWRITE_PROMPT,
+    SUGGEST_FOLLOWUPS_PROMPT,
     TITLE_PROMPT,
     render_answer_facts,
     render_sample_rows,
@@ -284,6 +285,17 @@ class CloudflareProvider:
         body = await self._run({"messages": [{"role": "user", "content": prompt}]})
         title = self._extract_text(body)
         return " ".join(title.strip().splitlines()[:1]).strip().strip('"')
+
+    async def suggest_followups(
+        self, question: str, columns: list[str], row_count: int
+    ) -> list[str]:
+        prompt = SUGGEST_FOLLOWUPS_PROMPT.format(
+            question=question,
+            columns=", ".join(columns) or "(none)",
+            row_count=row_count,
+        )
+        body = await self._run({"messages": [{"role": "user", "content": prompt}]})
+        return parse_suggestion_list(self._extract_text(body))
 
     @staticmethod
     def _extract_usage(body: dict) -> tuple[int, int]:

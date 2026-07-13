@@ -113,6 +113,17 @@ class UIMessageStream:
             {"type": "tool-output-available", "toolCallId": tool_id, "output": payload}
         )
 
+    def suggestions(self, items: list[str]) -> str:
+        """Emit follow-up suggestions as an AI SDK v6 `data-suggestions` part.
+
+        The frontend converts `data-*` parts into typed message parts; clients
+        that don't know the part warn and drop it, so this is always safe to
+        send. Closes any open text block first, like `tool_input`.
+        """
+        out = self.text_end()
+        out += self._frame({"type": "data-suggestions", "data": list(items)})
+        return out
+
     def finish(self) -> str:
         """Close the stream: `finish-step`, `finish`, then `[DONE]`."""
         out = self.text_end()

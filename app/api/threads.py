@@ -10,12 +10,15 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, status
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import User
 from app.deps import get_current_user, get_session
 from app.threads import service
+from app.threads.pdf import render_thread_pdf, report_filename
 from app.threads.service import ThreadStatus
 
 router = APIRouter(prefix="/api/threads", tags=["threads"])
@@ -143,6 +146,28 @@ async def get_thread_messages(
             MessageRow(id=m.id, parent_id=m.parent_id, format=m.format, content=m.content)
             for m in messages
         ],
+    )
+
+
+@router.get("/{thread_id}/export/pdf")
+async def export_thread_pdf(
+    thread_id: str, session: SessionDep, user: UserDep
+) -> Response:
+    """Download the thread as a branded, insights-only PDF report.
+
+    Ownership is enforced by the service layer (foreign/missing → 404).
+    PDF assembly is CPU-bound, so it runs in the threadpool.
+    """
+    thread = await service.get_thread(session, user, thread_id)
+    head_id, messages = await service.list_messages(session, user, thread_id)
+    pdf_bytes = await run_in_threadpool(
+        lambda: render_thread_pdf(head_id=head_id, messages=messages, user=user)
+    )
+    filename = report_filename(thread.title)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

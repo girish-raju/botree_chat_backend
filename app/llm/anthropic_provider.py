@@ -14,10 +14,11 @@ import anthropic
 
 from app.config import Settings
 from app.errors import UpstreamLLMError
-from app.llm.base import SQLPlan, Turn, ValidateHook
+from app.llm.base import SQLPlan, Turn, ValidateHook, parse_suggestion_list
 from app.llm.prompts import (
     ANSWER_PROMPT,
     REWRITE_PROMPT,
+    SUGGEST_FOLLOWUPS_PROMPT,
     TITLE_PROMPT,
     build_dynamic_system_block,
     build_static_system_block,
@@ -208,6 +209,17 @@ class AnthropicProvider:
         prompt = TITLE_PROMPT.format(text=text)
         title = await self._small_completion(prompt, max_tokens=30)
         return " ".join(title.strip().splitlines()[:1]).strip().strip('"')
+
+    async def suggest_followups(
+        self, question: str, columns: list[str], row_count: int
+    ) -> list[str]:
+        prompt = SUGGEST_FOLLOWUPS_PROMPT.format(
+            question=question,
+            columns=", ".join(columns) or "(none)",
+            row_count=row_count,
+        )
+        text = await self._small_completion(prompt, max_tokens=200)
+        return parse_suggestion_list(text)
 
     async def _small_completion(self, prompt: str, max_tokens: int) -> str:
         try:

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.chat import get_pipeline
 from app.auth.passwords import hash_password
-from app.chat.pipeline import Done, TextDelta, ToolResult, ToolSQL
+from app.chat.pipeline import Done, Suggestions, TextDelta, ToolResult, ToolSQL
 from app.db.models import User
 
 PASSWORD = "s3cret-pass"
@@ -31,6 +31,7 @@ class FakePipeline:
         )
         yield TextDelta("You have ")
         yield TextDelta("1 distributor.")
+        yield Suggestions(["Distributor count by state", "Region wise sales"])
         yield Done()
 
 
@@ -85,6 +86,10 @@ async def test_chat_streams_v6_frames(app: FastAPI, client: AsyncClient, seeded_
     assert '"type":"tool-output-available"' in body
     assert '"type":"text-delta"' in body
     assert "1 distributor." in body
+    assert (
+        '{"type":"data-suggestions","data":'
+        '["Distributor count by state","Region wise sales"]}'
+    ) in body
     assert '"type":"finish"' in body
     assert "data: [DONE]" in body
 

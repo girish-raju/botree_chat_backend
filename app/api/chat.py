@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.cache.embeddings import get_embedder
 from app.cache.results import ResultCache
 from app.cache.semantic import QueryCache
-from app.chat.pipeline import ChatPipeline, TextDelta, ToolResult, ToolSQL
+from app.chat.pipeline import ChatPipeline, Suggestions, TextDelta, ToolResult, ToolSQL
 from app.chat.stream import STREAM_HEADERS, UIMessageStream
 from app.config import get_settings
 from app.db.models import User
@@ -132,6 +132,8 @@ async def _event_stream(
                 yield enc.tool_input(event.sql)
             elif isinstance(event, ToolResult):
                 yield enc.tool_output(event.payload)
+            elif isinstance(event, Suggestions):
+                yield enc.suggestions(event.items)
             # Done needs no frame of its own; finish() is emitted below.
     except asyncio.CancelledError:  # client disconnected mid-stream
         logger.info("chat_stream_cancelled")

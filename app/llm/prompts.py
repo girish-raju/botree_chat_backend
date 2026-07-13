@@ -18,7 +18,11 @@ from datetime import date
 from app.domain.formatting import format_rupees, is_money_column
 from app.domain.glossary import BUSINESS_GLOSSARY, STATE_NAME_MAP
 from app.domain.schema_catalog import RELATIONSHIPS, SCHEMA_DESCRIPTION, format_schema_description
-from app.domain.sql_rules import FEW_SHOT_EXAMPLES, SQL_RULES
+from app.domain.sql_rules import (
+    CONDENSED_FEW_SHOT_EXAMPLES,
+    FEW_SHOT_EXAMPLES,
+    SQL_RULES,
+)
 
 
 @functools.cache
@@ -133,6 +137,8 @@ def render_sample_rows(sample_rows: list[dict], columns: list[str]) -> str:
     """
 
     def fmt(col: str, value: object) -> str:
+        if value is None:
+            return "(blank)"  # never show the model a Python None to parrot
         if (
             is_money_column(col)
             and isinstance(value, (int, float))
@@ -156,6 +162,21 @@ Text: {text}
 Title:"""
 
 
+SUGGEST_FOLLOWUPS_PROMPT = """The user just asked a business-data question and got an answer. \
+Suggest up to 3 SHORT follow-up questions they would most likely tap next — natural \
+drill-downs or comparisons such as "Month wise", "Region wise", "Top 10 products", \
+"Compare with last year". Phrase each exactly as the user would type it (plain \
+English, under 10 words, no numbering, no punctuation at the end). Suggest fewer \
+than 3 — or none — if there is no genuinely useful follow-up. NEVER repeat the \
+question that was just asked.
+
+Question just answered: {question}
+Result columns: {columns}
+Rows returned: {row_count}
+
+Output ONLY a JSON array of 0 to 3 strings (e.g. ["...", "..."]), no other text."""
+
+
 def _build_cloudflare_sql_prompt() -> str:
     """Assemble the trimmed system prompt used by the Cloudflare provider.
 
@@ -168,7 +189,9 @@ def _build_cloudflare_sql_prompt() -> str:
     for table, cols in SCHEMA_DESCRIPTION.items():
         schema_lines.append(f"{table}: {', '.join(cols.keys())}")
 
-    few_shots = "\n".join(f"Q: {ex['question']}\nSQL: {ex['sql']}" for ex in FEW_SHOT_EXAMPLES[:5])
+    few_shots = "\n".join(
+        f"Q: {ex['question']}\nSQL: {ex['sql']}" for ex in CONDENSED_FEW_SHOT_EXAMPLES
+    )
 
     return f"""You are an expert MySQL analyst for an FMCG distribution database. \
 Given a business question, produce a single read-only MySQL SELECT statement, or a direct \
@@ -198,6 +221,26 @@ EXACTLY like "total sales" — add NO geo_hier* or sales_hier* filter. NEVER inv
 literal values like 'My Zone', 'My Region', 'My Area' or 'VP Sales' — no such value \
 exists and it matches ZERO rows. Only add a geo/sales filter when the user names a \
 REAL place (e.g. "Chennai", "Tamil Nadu", "South zone").
+7. HUMAN-READABLE OUTPUT: "how many / no of / count / total X" => return ONE \
+aggregated row (SELECT COALESCE(SUM(...),0) AS ClearAlias — 0, never NULL, for \
+an empty period), NEVER a raw column dump of per-row values. Every multi-row \
+result needs a descriptive label column \
+(name/month/place) with a plain alias (AS Region, AS Month) — never raw column \
+names like measure_14 as headers. Month-wise => DATE_FORMAT(<date_col>, '%M %Y') \
+AS Month, GROUP BY DATE_FORMAT(<date_col>, '%M %Y'), ORDER BY MIN(<date_col>) so \
+months appear as names in order (January 2026, February 2026, ...). Grouped label \
+columns must never show blank: use COALESCE(NULLIF(<label>,''),'Unknown') AS \
+<Alias> and GROUP BY the same expression.
+8. REGION: geo_hier3_name (Region) exists ONLY in distributor_t and salesman_t — \
+NO fact table has it. "Region wise" on invoice/order/purchase/coverage => JOIN \
+distributor_t d ON <fact>.distributor_code = d.code and GROUP BY \
+COALESCE(NULLIF(d.geo_hier3_name,''),'Unknown'). NEVER alias geo_hier4_name \
+(State) as Region.
+9. COVERAGE (rpt_coverage_productivity_t) is per salesman-route-DAY counts. \
+"outlets not visited" = SUM(cov.no_of_outlet_not_visited); "outlets that did not \
+order / have not ordered" = SUM(cov.no_of_ordered_outlets_without_TO); "outlets \
+visited" = SUM(cov.no_of_actual_outlets). NEVER SUM or AVG the *_perc columns — \
+recompute: SUM(no_of_actual_outlets)/NULLIF(SUM(no_of_planned_outlets),0)*100.
 
 ### EXAMPLES
 {few_shots}
@@ -232,6 +275,7 @@ __all__ = [
     "render_answer_facts",
     "render_sample_rows",
     "TITLE_PROMPT",
+    "SUGGEST_FOLLOWUPS_PROMPT",
     "CLOUDFLARE_SQL_PROMPT",
     "STRICT_JSON_SQL_PROMPT",
 ]

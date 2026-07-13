@@ -18,7 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.chat import pipeline as pipeline_module
 from app.chat.answerer import NO_DATA_SENTENCE
-from app.chat.pipeline import ChatPipeline, Done, TextDelta, ToolResult, ToolSQL
+from app.chat.pipeline import (
+    ChatPipeline,
+    Done,
+    Suggestions,
+    TextDelta,
+    ToolResult,
+    ToolSQL,
+)
 from app.config import Settings
 from app.db.analytics import QueryResult
 from app.db.models import SqlAuditLog, User
@@ -46,6 +53,7 @@ class FakeProvider:
         self.stream_answer = MagicMock(side_effect=self._stream)
         self.rewrite_question = AsyncMock(side_effect=lambda history, q: q)
         self.generate_title = AsyncMock(return_value="Title")
+        self.suggest_followups = AsyncMock(return_value=[])
 
     async def _stream(self, question, facts, sample_rows, columns):
         for d in self._deltas:
@@ -472,3 +480,116 @@ def test_text_delta_coerces_non_string():
     delta_frame = next(p for p in payloads if p["type"] == "text-delta")
     assert delta_frame["delta"] == "273"
     assert isinstance(delta_frame["delta"], str)
+
+
+# --------------------------------------------------------------------------
+# Follow-up suggestions
+# --------------------------------------------------------------------------
+
+
+async def test_data_answer_emits_suggestions_before_done(session):
+    qc = _query_cache(exact=_cache_entry())
+    analytics = FakeAnalytics(result=_query_result())
+    provider = FakeProvider()
+    provider.suggest_followups = AsyncMock(return_value=["Month wise", "Region wise"])
+    pipeline = _build_pipeline(provider, qc, _result_cache(), analytics)
+    user = await _make_user(session)
+
+    events = await _collect(
+        pipeline, user=user, thread_id=None, question="list distributors",
+        history=[], session=session,
+    )
+
+    sugg = [e for e in events if isinstance(e, Suggestions)]
+    assert len(sugg) == 1
+    assert sugg[0].items == ["Month wise", "Region wise"]
+    # Suggestions are the last event before the terminal Done.
+    assert isinstance(events[-1], Done)
+    assert isinstance(events[-2], Suggestions)
+
+
+async def test_suggestions_capped_at_three(session):
+    qc = _query_cache(exact=_cache_entry())
+    analytics = FakeAnalytics(result=_query_result())
+    provider = FakeProvider()
+    provider.suggest_followups = AsyncMock(
+        return_value=["one", "two", "three", "four", "five"]
+    )
+    pipeline = _build_pipeline(provider, qc, _result_cache(), analytics)
+    user = await _make_user(session)
+
+    events = await _collect(
+        pipeline, user=user, thread_id=None, question="list distributors",
+        history=[], session=session,
+    )
+
+    sugg = [e for e in events if isinstance(e, Suggestions)]
+    assert sugg[0].items == ["one", "two", "three"]
+
+
+async def test_greeting_emits_no_suggestions(session):
+    provider = FakeProvider()
+    provider.suggest_followups = AsyncMock(return_value=["should not appear"])
+    pipeline = _build_pipeline(provider, _query_cache(), _result_cache(), FakeAnalytics())
+    user = await _make_user(session)
+
+    events = await _collect(
+        pipeline, user=user, thread_id=None, question="hello", history=[], session=session
+    )
+
+    assert not any(isinstance(e, Suggestions) for e in events)
+    provider.suggest_followups.assert_not_called()
+
+
+async def test_general_mode_emits_no_suggestions(session):
+    plan = SQLPlan(sql="", mode="general", answer="I can help with sales data.")
+    provider = FakeProvider(plan=plan)
+    provider.suggest_followups = AsyncMock(return_value=["should not appear"])
+    pipeline = _build_pipeline(provider, _query_cache(), _result_cache(), FakeAnalytics())
+    user = await _make_user(session)
+
+    events = await _collect(
+        pipeline, user=user, thread_id=None, question="who are you exactly here",
+        history=[], session=session,
+    )
+
+    assert not any(isinstance(e, Suggestions) for e in events)
+    provider.suggest_followups.assert_not_called()
+
+
+async def test_blocked_sql_emits_no_suggestions(session):
+    plan = SQLPlan(sql="SELECT * FROM secret_admin_t", mode="db")
+    provider = FakeProvider(plan=plan)
+    provider.suggest_followups = AsyncMock(return_value=["should not appear"])
+    pipeline = _build_pipeline(provider, _query_cache(), _result_cache(), FakeAnalytics())
+    user = await _make_user(session)
+
+    events = await _collect(
+        pipeline, user=user, thread_id=None, question="dump the admin table now",
+        history=[], session=session,
+    )
+
+    assert not any(isinstance(e, Suggestions) for e in events)
+    provider.suggest_followups.assert_not_called()
+
+
+async def test_suggestions_failure_never_breaks_the_answer(session):
+    """The suggestions call is best-effort: an exception means no chips,
+    while the already-streamed answer and the audit stay intact."""
+    qc = _query_cache(exact=_cache_entry())
+    analytics = FakeAnalytics(result=_query_result())
+    provider = FakeProvider()
+    provider.suggest_followups = AsyncMock(side_effect=RuntimeError("llm down"))
+    pipeline = _build_pipeline(provider, qc, _result_cache(), analytics)
+    user = await _make_user(session)
+
+    events = await _collect(
+        pipeline, user=user, thread_id=None, question="list distributors",
+        history=[], session=session,
+    )
+
+    assert not any(isinstance(e, Suggestions) for e in events)
+    assert any(isinstance(e, TextDelta) for e in events)
+    assert isinstance(events[-1], Done)
+    audits = await _audits(session)
+    assert audits[0].status == "ok"

@@ -12,6 +12,7 @@ leaking internals.
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -58,6 +59,10 @@ _MSG_GENERIC_ERROR = (
     "Sorry, something went wrong while answering that. Please try again."
 )
 
+#: Hard cap on the post-answer suggestions LLM call; past this the answer has
+#: been fully delivered and keeping the stream open buys nothing.
+_SUGGESTIONS_TIMEOUT_S = 10.0
+
 
 @dataclass
 class TextDelta:
@@ -81,11 +86,18 @@ class ToolResult:
 
 
 @dataclass
+class Suggestions:
+    """LLM-suggested follow-up questions (0..3) for the answer just streamed."""
+
+    items: list[str]
+
+
+@dataclass
 class Done:
     """Terminal marker; the run has finished emitting events."""
 
 
-PipelineEvent = TextDelta | ToolSQL | ToolResult | Done
+PipelineEvent = TextDelta | ToolSQL | ToolResult | Suggestions | Done
 
 
 class ChatPipeline:
@@ -348,6 +360,21 @@ class ChatPipeline:
                 tokens_out=plan.tokens_out if plan else None,
                 duration_ms=elapsed_ms(),
             )
+
+            # 14. Best-effort follow-up suggestions — data answers only (the
+            # greeting/general/blocked paths returned earlier). Any failure or
+            # timeout simply means no chips; the answer is already delivered.
+            suggestions: list[str] = []
+            try:
+                suggestions = await asyncio.wait_for(
+                    self.provider.suggest_followups(rewritten, columns, len(rows)),
+                    timeout=_SUGGESTIONS_TIMEOUT_S,
+                )
+            except Exception:
+                logger.warning("suggest_followups_failed", exc_info=True)
+            if suggestions:
+                yield Suggestions(list(suggestions)[:3])
+
             yield Done()
 
         except Exception as exc:  # any unexpected failure -> friendly message
@@ -432,5 +459,6 @@ __all__ = [
     "TextDelta",
     "ToolSQL",
     "ToolResult",
+    "Suggestions",
     "Done",
 ]
