@@ -1,9 +1,10 @@
 """Streaming chat endpoint.
 
 `POST /api/chat` accepts the Vercel AI SDK v6 request shape
-(`{messages: [...], threadId?}`), extracts the latest user message as the
-question and the prior messages as conversation history, runs `ChatPipeline`,
-and streams the result back as an AI SDK v6 UI message stream over SSE.
+(`{messages: [...], threadId? | id?}`), extracts the latest user message as
+the question and the prior messages as conversation history, runs
+`ChatPipeline`, and streams the result back as an AI SDK v6 UI message stream
+over SSE.
 """
 
 from __future__ import annotations
@@ -102,7 +103,11 @@ def _parse_body(body: dict[str, Any]) -> tuple[str, list[Turn], str | None]:
         if text.strip():
             history.append(Turn(role=role, text=text))
 
-    thread_id = body.get("threadId") or body.get("thread_id")
+    # AI SDK v6 `useChat` sends the chat id (the thread's remoteId) as a
+    # top-level `id`; explicit `threadId`/`thread_id` take precedence.
+    thread_id = body.get("threadId") or body.get("thread_id") or body.get("id")
+    if not isinstance(thread_id, str):
+        thread_id = None
     return question, history, thread_id
 
 

@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     bedrock_region: str = "ap-south-1"
-    bedrock_model: str = "openai.gpt-oss-20b-1:0"
+    bedrock_model: str = "global.anthropic.claude-sonnet-5"
 
     # MySQL analytics. Each field also accepts the DB_* names used by the
     # original conversational bots' .env (DB_HOST, DB_PORT, DB_NAME, ...), so

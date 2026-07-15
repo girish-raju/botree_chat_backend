@@ -1,17 +1,17 @@
-"""Amazon Bedrock-backed `LLMProvider` implementation (OpenAI-compatible API).
+"""Amazon Bedrock-backed `LLMProvider` implementation (Converse API).
 
-Talks to Bedrock's OpenAI-compatible chat-completions endpoint
-(`https://bedrock-runtime.{region}.amazonaws.com/openai/v1/chat/completions`)
-over plain HTTP via `httpx`, authenticated with a bearer token: either a
-Bedrock API key from settings, or one auto-generated from plain IAM keys via
-`aws-bedrock-token-generator` (pure SigV4 presigning, no network call).
+Talks to Bedrock's native Converse endpoints
+(`https://bedrock-runtime.{region}.amazonaws.com/model/{model}/converse` and
+`.../converse-stream`) over plain HTTP via `httpx`, authenticated with a
+bearer token: either a Bedrock API key from settings, or one auto-generated
+from plain IAM keys via `aws-bedrock-token-generator` (pure SigV4 presigning,
+no network call).
 
-Serves reasoning models like gpt-oss-20b; reasoning is pinned low (both the
-`reasoning_effort` param and a `Reasoning: low` system hint). Bedrock's
-gpt-oss serving emits chain-of-thought INLINE in `content` as
-`<reasoning>...</reasoning>` blocks (observed live on ap-south-1) — these are
-stripped from every response, including tags split across stream chunks, so
-only the final answer ever reaches the user.
+Serves Claude models (e.g. `global.anthropic.claude-sonnet-5`). Claude's
+adaptive thinking arrives as separate `reasoningContent` blocks in Converse
+responses — only `text` blocks are ever surfaced, so chain-of-thought never
+reaches the user. Streaming uses the AWS event-stream framing, decoded with
+botocore's `EventStreamBuffer`.
 
 Control flow (strict-JSON prompt, `parse_llm_json` repair, exactly one forced
 retry, streaming with non-streaming fallback) mirrors `CloudflareProvider`.
@@ -20,13 +20,13 @@ retry, streaming with non-streaming fallback) mirrors `CloudflareProvider`.
 from __future__ import annotations
 
 import json
-import re
 import time
 from collections.abc import AsyncIterator
 
 import httpx
 from aws_bedrock_token_generator import BedrockTokenGenerator
 from botocore.credentials import Credentials
+from botocore.eventstream import EventStreamBuffer
 
 from app.config import Settings
 from app.errors import UpstreamLLMError
@@ -41,83 +41,33 @@ from app.llm.prompts import (
     render_answer_facts,
     render_sample_rows,
 )
+from app.llm.usage import record_usage
 
-_CHAT_URL = "https://bedrock-runtime.{region}.amazonaws.com/openai/v1/chat/completions"
+_CONVERSE_URL = "https://bedrock-runtime.{region}.amazonaws.com/model/{model}/converse"
+_CONVERSE_STREAM_URL = (
+    "https://bedrock-runtime.{region}.amazonaws.com/model/{model}/converse-stream"
+)
 
-# gpt-oss reads a "Reasoning: low|medium|high" directive from the system
-# prompt; kept alongside the reasoning_effort param so latency stays low even
-# if the endpoint drops the param.
-_REASONING_HINT = "Reasoning: low"
-
-# Reasoning tokens count against the completion budget, so leave headroom
-# beyond what the strict-JSON plan itself needs.
-_MAX_COMPLETION_TOKENS = 2048
+# Claude Sonnet's adaptive thinking tokens count against the same output
+# budget as the answer, so leave headroom beyond what the strict-JSON plan
+# itself needs.
+_MAX_TOKENS = 4096
 
 # Generated bearer tokens are valid 12h; refresh well before that.
 _TOKEN_REFRESH_S = 6 * 3600
 
-_REASONING_OPEN = "<reasoning>"
-_REASONING_CLOSE = "</reasoning>"
-_REASONING_BLOCK_RE = re.compile(r"<reasoning>.*?(?:</reasoning>|\Z)", re.DOTALL)
 
-
-def _strip_reasoning(text: str) -> str:
-    """Drop inline `<reasoning>...</reasoning>` chain-of-thought blocks."""
-    return _REASONING_BLOCK_RE.sub("", text)
-
-
-def _partial_tag_len(text: str, tag: str) -> int:
-    """Length of the longest strict prefix of `tag` that `text` ends with."""
-    for size in range(min(len(tag) - 1, len(text)), 0, -1):
-        if text.endswith(tag[:size]):
-            return size
-    return 0
-
-
-class _ReasoningStreamFilter:
-    """Incrementally removes `<reasoning>...</reasoning>` spans from a stream.
-
-    Tags can be split across chunk boundaries, so a potential partial tag at
-    the end of the buffer is held back until the next chunk resolves it.
-    """
-
-    def __init__(self) -> None:
-        self._buf = ""
-        self._inside = False
-
-    def feed(self, chunk: str) -> str:
-        self._buf += chunk
-        out: list[str] = []
-        while self._buf:
-            if self._inside:
-                end = self._buf.find(_REASONING_CLOSE)
-                if end == -1:
-                    # Still inside reasoning: discard all but a possible
-                    # partial closing tag at the tail.
-                    self._buf = self._buf[
-                        len(self._buf) - _partial_tag_len(self._buf, _REASONING_CLOSE) :
-                    ]
-                    break
-                self._buf = self._buf[end + len(_REASONING_CLOSE) :]
-                self._inside = False
-            else:
-                start = self._buf.find(_REASONING_OPEN)
-                if start == -1:
-                    # Emit everything except a possible partial opening tag.
-                    safe = len(self._buf) - _partial_tag_len(self._buf, _REASONING_OPEN)
-                    out.append(self._buf[:safe])
-                    self._buf = self._buf[safe:]
-                    break
-                out.append(self._buf[:start])
-                self._buf = self._buf[start + len(_REASONING_OPEN) :]
-                self._inside = True
-        return "".join(out)
-
-    def flush(self) -> str:
-        """Emit whatever is held back (a partial tag that never completed)."""
-        remainder = "" if self._inside else self._buf
-        self._buf = ""
-        return remainder
+def _converse_messages(messages: list[dict]) -> list[dict]:
+    """Convert `{role, content}` dicts to Converse shape, merging consecutive
+    same-role turns (Converse requires strict user/assistant alternation)."""
+    out: list[dict] = []
+    for message in messages:
+        block = {"text": message["content"]}
+        if out and out[-1]["role"] == message["role"]:
+            out[-1]["content"].append(block)
+        else:
+            out.append({"role": message["role"], "content": [block]})
+    return out
 
 
 def _history_to_messages(history: list[Turn]) -> list[dict]:
@@ -125,14 +75,12 @@ def _history_to_messages(history: list[Turn]) -> list[dict]:
 
 
 class BedrockProvider:
-    """`LLMProvider` implementation backed by Amazon Bedrock (gpt-oss et al.)."""
+    """`LLMProvider` implementation backed by Amazon Bedrock (Claude via Converse)."""
 
     name = "bedrock"
 
     def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
         self._settings = settings
-        # Reasoning models have higher first-token latency than plain chat
-        # models — allow more than the Cloudflare provider's 30s.
         self._client = client or httpx.AsyncClient(timeout=60.0)
         self._own_client = client is None
         self._token: str | None = None
@@ -140,7 +88,15 @@ class BedrockProvider:
 
     @property
     def _url(self) -> str:
-        return _CHAT_URL.format(region=self._settings.bedrock_region)
+        return _CONVERSE_URL.format(
+            region=self._settings.bedrock_region, model=self._settings.bedrock_model
+        )
+
+    @property
+    def _stream_url(self) -> str:
+        return _CONVERSE_STREAM_URL.format(
+            region=self._settings.bedrock_region, model=self._settings.bedrock_model
+        )
 
     def _bearer_token(self) -> str:
         """Return a Bedrock bearer token.
@@ -174,24 +130,23 @@ class BedrockProvider:
             "Content-Type": "application/json",
         }
 
-    def _payload(self, messages: list[dict], *, stream: bool = False) -> dict:
-        payload = {
-            "model": self._settings.bedrock_model,
-            "messages": messages,
-            "max_completion_tokens": _MAX_COMPLETION_TOKENS,
-            "temperature": 0.1,
-            "reasoning_effort": "low",
+    def _payload(self, messages: list[dict], *, system: str | None = None) -> dict:
+        payload: dict = {
+            "messages": _converse_messages(messages),
+            "inferenceConfig": {"maxTokens": _MAX_TOKENS},
         }
-        if stream:
-            payload["stream"] = True
+        if system:
+            payload["system"] = [{"text": system}]
         return payload
 
-    @staticmethod
-    def _system_prompt(base: str) -> str:
-        return f"{_REASONING_HINT}\n\n{base}"
+    def _finish(self, response: httpx.Response) -> dict:
+        """Parse a completed response, recording its usage into the tally."""
+        body = response.json()
+        record_usage(*self._extract_usage(body))
+        return body
 
-    async def _run(self, messages: list[dict]) -> dict:
-        payload = self._payload(messages)
+    async def _run(self, messages: list[dict], *, system: str | None = None) -> dict:
+        payload = self._payload(messages, system=system)
         try:
             response = await self._client.post(self._url, headers=self._headers, json=payload)
             response.raise_for_status()
@@ -201,26 +156,12 @@ class BedrockProvider:
                 body_text = exc.response.text[:300]
             except Exception:  # noqa: BLE001 - diagnostics only
                 pass
-            # Least-certain endpoint detail: reasoning_effort acceptance. If
-            # the API rejects the param, drop it and try once more.
-            if exc.response.status_code == 400 and "reasoning_effort" in body_text:
-                retry_payload = {k: v for k, v in payload.items() if k != "reasoning_effort"}
-                try:
-                    response = await self._client.post(
-                        self._url, headers=self._headers, json=retry_payload
-                    )
-                    response.raise_for_status()
-                    return response.json()
-                except httpx.HTTPError as retry_exc:
-                    raise UpstreamLLMError(
-                        f"Bedrock API request failed: {retry_exc}"
-                    ) from retry_exc
             raise UpstreamLLMError(
                 f"Bedrock API request failed: {exc}: {body_text}".rstrip(": ")
             ) from exc
         except httpx.HTTPError as exc:
             raise UpstreamLLMError(f"Bedrock API request failed: {exc}") from exc
-        return response.json()
+        return self._finish(response)
 
     async def generate_sql(
         self,
@@ -228,11 +169,10 @@ class BedrockProvider:
         history: list[Turn],
         validate: ValidateHook | None = None,
     ) -> SQLPlan:
-        messages = [{"role": "system", "content": self._system_prompt(STRICT_JSON_SQL_PROMPT)}]
-        messages.extend(_history_to_messages(history))
+        messages = _history_to_messages(history)
         messages.append({"role": "user", "content": question})
 
-        body = await self._run(messages)
+        body = await self._run(messages, system=STRICT_JSON_SQL_PROMPT)
         text = self._extract_text(body)
         tokens_in, tokens_out = self._extract_usage(body)
         parsed = parse_llm_json(text)
@@ -273,7 +213,7 @@ class BedrockProvider:
         # Exactly one retry.
         retry_messages = list(messages)
         retry_messages.append({"role": "user", "content": retry_reason})
-        retry_body = await self._run(retry_messages)
+        retry_body = await self._run(retry_messages, system=STRICT_JSON_SQL_PROMPT)
         retry_text = self._extract_text(retry_body)
         r_in, r_out = self._extract_usage(retry_body)
         retry_parsed = parse_llm_json(retry_text)
@@ -332,46 +272,36 @@ class BedrockProvider:
         messages = [{"role": "user", "content": prompt}]
 
         got_any = False
-        reasoning_filter = _ReasoningStreamFilter()
         try:
             async with self._client.stream(
                 "POST",
-                self._url,
+                self._stream_url,
                 headers=self._headers,
-                json=self._payload(messages, stream=True),
+                json=self._payload(messages),
             ) as response:
                 response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[len("data:") :].strip()
-                    if not data:
-                        continue
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-                    # The final chunk may carry usage only, with empty choices.
-                    choices = chunk.get("choices") or []
-                    if not choices:
-                        continue
-                    delta = (choices[0] or {}).get("delta") or {}
-                    # Reasoning deltas (delta.reasoning_content) are internal
-                    # chain-of-thought — never surface them.
-                    content = delta.get("content")
-                    if isinstance(content, str) and content:
-                        # gpt-oss on Bedrock inlines chain-of-thought in the
-                        # content stream as <reasoning>...</reasoning>.
-                        visible = reasoning_filter.feed(content)
-                        if visible:
+                buffer = EventStreamBuffer()
+                async for chunk in response.aiter_bytes():
+                    buffer.add_data(chunk)
+                    for event in buffer:
+                        if event.headers.get(":message-type") != "event":
+                            continue
+                        try:
+                            payload = json.loads(event.payload.decode("utf-8"))
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            continue
+                        event_type = event.headers.get(":event-type")
+                        if event_type == "metadata":
+                            record_usage(*self._extract_usage(payload))
+                            continue
+                        if event_type != "contentBlockDelta":
+                            continue
+                        # Thinking arrives as delta.reasoningContent — internal
+                        # chain-of-thought, never surfaced. Only text is.
+                        text = (payload.get("delta") or {}).get("text")
+                        if isinstance(text, str) and text:
                             got_any = True
-                            yield visible
-                tail = reasoning_filter.flush()
-                if tail:
-                    got_any = True
-                    yield tail
+                            yield text
         except httpx.HTTPError:
             # If ANY answer text was already yielded, never fall back — the
             # fallback would generate a second, different answer and the user
@@ -412,43 +342,29 @@ class BedrockProvider:
 
     @staticmethod
     def _extract_usage(body: dict) -> tuple[int, int]:
-        """Return (prompt_tokens, completion_tokens); (0, 0) if absent."""
+        """Return (input_tokens, output_tokens); (0, 0) if absent."""
         usage = body.get("usage")
         if not isinstance(usage, dict):
             return 0, 0
-        tokens_in = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
-        tokens_out = usage.get("completion_tokens") or usage.get("output_tokens") or 0
         try:
-            return int(tokens_in), int(tokens_out)
+            return int(usage.get("inputTokens") or 0), int(usage.get("outputTokens") or 0)
         except (TypeError, ValueError):
             return 0, 0
 
     @staticmethod
     def _extract_text(body: dict) -> str:
-        """Pull the final message text out of an OpenAI chat-completions body.
+        """Pull the final message text out of a Converse response body.
 
-        Reads only `message.content` — `message.reasoning_content` (gpt-oss
-        chain-of-thought on some servings) is deliberately never surfaced, and
-        inline `<reasoning>...</reasoning>` blocks (the shape Bedrock's
-        gpt-oss serving actually emits) are stripped. `content` may also be a
-        list of typed parts on some OpenAI-compatible servers; join the text
-        parts in that case.
+        Joins the `text` items of `output.message.content` — `reasoningContent`
+        blocks (Claude's thinking) are deliberately never surfaced.
         """
-        for choice in body.get("choices") or []:
-            msg = (choice or {}).get("message") or {}
-            content = msg.get("content")
-            if isinstance(content, str) and content.strip():
-                return _strip_reasoning(content)
-            if isinstance(content, list):
-                parts = [
-                    part.get("text", "")
-                    for part in content
-                    if isinstance(part, dict) and part.get("type") == "text"
-                ]
-                joined = "".join(parts)
-                if joined.strip():
-                    return _strip_reasoning(joined)
-        return ""
+        message = (body.get("output") or {}).get("message") or {}
+        parts = [
+            item["text"]
+            for item in message.get("content") or []
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        ]
+        return "".join(parts)
 
 
 __all__ = ["BedrockProvider"]

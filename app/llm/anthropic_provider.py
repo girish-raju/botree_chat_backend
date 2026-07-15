@@ -25,6 +25,7 @@ from app.llm.prompts import (
     render_answer_facts,
     render_sample_rows,
 )
+from app.llm.usage import record_usage
 
 _QUERY_DATABASE_TOOL = {
     "name": "query_database",
@@ -108,9 +109,12 @@ class AnthropicProvider:
 
             usage = getattr(response, "usage", None)
             if usage is not None:
-                tokens_in += getattr(usage, "input_tokens", 0) or 0
-                tokens_out += getattr(usage, "output_tokens", 0) or 0
+                attempt_in = getattr(usage, "input_tokens", 0) or 0
+                attempt_out = getattr(usage, "output_tokens", 0) or 0
+                tokens_in += attempt_in
+                tokens_out += attempt_out
                 cache_read_tokens += getattr(usage, "cache_read_input_tokens", 0) or 0
+                record_usage(attempt_in, attempt_out)
 
             tool_use_block = None
             text_parts: list[str] = []
@@ -192,6 +196,16 @@ class AnthropicProvider:
             ) as stream:
                 async for text in stream.text_stream:
                     yield text
+                try:
+                    final = await stream.get_final_message()
+                    usage = getattr(final, "usage", None)
+                    if usage is not None:
+                        record_usage(
+                            getattr(usage, "input_tokens", 0) or 0,
+                            getattr(usage, "output_tokens", 0) or 0,
+                        )
+                except Exception:  # noqa: BLE001 - accounting must never break a delivered answer
+                    pass
         except anthropic.APIError as exc:
             raise UpstreamLLMError(f"Anthropic API error while streaming answer: {exc}") from exc
         except Exception as exc:  # noqa: BLE001
@@ -233,6 +247,12 @@ class AnthropicProvider:
         except Exception as exc:  # noqa: BLE001
             raise UpstreamLLMError(f"Anthropic request failed: {exc}") from exc
 
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            record_usage(
+                getattr(usage, "input_tokens", 0) or 0,
+                getattr(usage, "output_tokens", 0) or 0,
+            )
         parts = [block.text for block in response.content if getattr(block, "type", None) == "text"]
         return "".join(parts)
 

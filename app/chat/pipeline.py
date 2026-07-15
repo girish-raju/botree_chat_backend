@@ -35,6 +35,7 @@ from app.db.models import SqlAuditLog, User
 from app.domain.formatting import GREETING_REPLY, is_greeting
 from app.errors import RBACError, SQLSafetyError
 from app.llm.base import LLMProvider, SQLPlan, Turn
+from app.llm.usage import current_tally, start_tally
 from app.rbac.hierarchy import get_subtree_for
 from app.rbac.injector import apply_scope
 from app.rbac.profiles import profile_from_user, rbac_fingerprint
@@ -150,6 +151,11 @@ class ChatPipeline:
     ) -> AsyncIterator[PipelineEvent]:
         """Run the full pipeline, yielding `PipelineEvent`s as work proceeds."""
         started = time.monotonic()
+        # Fresh per-turn token tally: every provider call (rewrite, SQL
+        # generation, answer streaming, suggestions) records its usage here,
+        # and `_audit` reads the totals — so even cache-hit and blocked rows
+        # carry the turn's real token spend.
+        start_tally()
         profile = profile_from_user(user)
         fingerprint = rbac_fingerprint(profile)
 
@@ -223,7 +229,6 @@ class ChatPipeline:
                         await self._audit(
                             session, user=user, thread_id=thread_id, question=question,
                             rewritten=rewritten, status="ok", cache_level="llm",
-                            tokens_in=plan.tokens_in, tokens_out=plan.tokens_out,
                             duration_ms=elapsed_ms(),
                         )
                         yield Done()
@@ -351,14 +356,13 @@ class ChatPipeline:
             if table:
                 yield TextDelta("\n\n" + table)
 
-            # 13. Done + audit.
-            await self._audit(
+            # 13. Done + audit. An L2 result-cache hit is the deepest cache
+            # level, so it wins over the SQL-resolution level (L0/L1/llm).
+            audit_row = await self._audit(
                 session, user=user, thread_id=thread_id, question=question,
                 rewritten=rewritten, generated_sql=raw_sql, final_sql=final_sql,
-                cache_level=cache_level, row_count=len(rows), status="ok",
-                tokens_in=plan.tokens_in if plan else None,
-                tokens_out=plan.tokens_out if plan else None,
-                duration_ms=elapsed_ms(),
+                cache_level="result" if served_cached else cache_level,
+                row_count=len(rows), status="ok", duration_ms=elapsed_ms(),
             )
 
             # 14. Best-effort follow-up suggestions — data answers only (the
@@ -374,6 +378,23 @@ class ChatPipeline:
                 logger.warning("suggest_followups_failed", exc_info=True)
             if suggestions:
                 yield Suggestions(list(suggestions)[:3])
+
+            # The suggestions call ran after the audit row was flushed — top
+            # up its token columns with the final tally. A SAVEPOINT keeps a
+            # failed UPDATE from rolling back the already-flushed INSERT.
+            tally = current_tally()
+            if (
+                audit_row is not None
+                and tally is not None
+                and (audit_row.tokens_in, audit_row.tokens_out)
+                != (tally.tokens_in, tally.tokens_out)
+            ):
+                try:
+                    async with session.begin_nested():
+                        audit_row.tokens_in = tally.tokens_in
+                        audit_row.tokens_out = tally.tokens_out
+                except Exception:
+                    logger.warning("audit_token_update_failed", exc_info=True)
 
             yield Done()
 
@@ -404,34 +425,42 @@ class ChatPipeline:
         cache_level: str | None = None,
         row_count: int | None = None,
         duration_ms: int | None = None,
-        tokens_in: int | None = None,
-        tokens_out: int | None = None,
         status: str,
         error: str | None = None,
-    ) -> None:
-        """Write exactly one `SqlAuditLog` row for this run. Never raises."""
+    ) -> SqlAuditLog | None:
+        """Write exactly one `SqlAuditLog` row for this run. Never raises.
+
+        Token columns come from the per-turn usage tally (see `app.llm.usage`),
+        so every terminal path — cache hits, greetings, blocked and errored
+        turns included — records the turn's real LLM spend (0 meaning
+        "measured, zero"). Rows written with no tally installed keep NULL
+        ("unmeasured"). Returns the flushed row so late-arriving usage (the
+        post-audit suggestions call) can be added to it.
+        """
+        tally = current_tally()
         try:
-            session.add(
-                SqlAuditLog(
-                    user_id=user.id,
-                    thread_id=_as_uuid(thread_id),
-                    question=question,
-                    rewritten_question=rewritten if rewritten != question else None,
-                    generated_sql=generated_sql,
-                    final_sql=final_sql,
-                    cache_level=cache_level,
-                    row_count=row_count,
-                    duration_ms=duration_ms,
-                    tokens_in=tokens_in,
-                    tokens_out=tokens_out,
-                    status=status,
-                    error=error,
-                )
+            row = SqlAuditLog(
+                user_id=user.id,
+                thread_id=_as_uuid(thread_id),
+                question=question,
+                rewritten_question=rewritten if rewritten != question else None,
+                generated_sql=generated_sql,
+                final_sql=final_sql,
+                cache_level=cache_level,
+                row_count=row_count,
+                duration_ms=duration_ms,
+                tokens_in=tally.tokens_in if tally else None,
+                tokens_out=tally.tokens_out if tally else None,
+                status=status,
+                error=error,
             )
+            session.add(row)
             await session.flush()
+            return row
         except Exception:  # pragma: no cover - auditing must not fail the request
             logger.warning("audit_flush_failed", exc_info=True)
             await _safe_rollback(session)
+            return None
 
 
 async def _safe_rollback(session: AsyncSession) -> None:

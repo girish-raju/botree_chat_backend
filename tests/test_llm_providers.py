@@ -25,6 +25,7 @@ from app.llm.bedrock_provider import BedrockProvider
 from app.llm.cloudflare_provider import CloudflareProvider, parse_llm_json
 from app.llm.factory import get_provider, reset_provider
 from app.llm.prompts import build_static_system_block
+from app.llm.usage import start_tally
 
 
 def _settings(**overrides) -> Settings:
@@ -1019,3 +1020,261 @@ async def test_bedrock_suggest_followups_junk_reply_yields_empty():
     items = await provider.suggest_followups("hello there", [], 0)
 
     assert items == []
+
+
+# ---------------------------------------------------------------------------
+# Per-turn usage tally recording (app.llm.usage)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bedrock_run_records_usage_into_tally():
+    tally = start_tally()
+    client = MagicMock()
+    body = _oai_body(
+        json.dumps({"mode": "db", "sql": "SELECT 1", "answer": ""}),
+        usage={"prompt_tokens": 1200, "completion_tokens": 42},
+    )
+    client.post = AsyncMock(return_value=_cf_response(body))
+    provider = _bedrock_provider(client)
+
+    plan = await provider.generate_sql("how many customers?", [], validate=None)
+
+    assert (tally.tokens_in, tally.tokens_out) == (1200, 42)
+    # SQLPlan fields stay populated too (unchanged contract).
+    assert (plan.tokens_in, plan.tokens_out) == (1200, 42)
+
+
+@pytest.mark.asyncio
+async def test_bedrock_retry_records_both_attempts():
+    tally = start_tally()
+    client = MagicMock()
+    bad = _cf_response(
+        _oai_body(
+            json.dumps({"mode": "db", "sql": "SELECT bad", "answer": ""}),
+            usage={"prompt_tokens": 100, "completion_tokens": 10},
+        )
+    )
+    good = _cf_response(
+        _oai_body(
+            json.dumps({"mode": "db", "sql": "SELECT 1", "answer": ""}),
+            usage={"prompt_tokens": 200, "completion_tokens": 20},
+        )
+    )
+    client.post = AsyncMock(side_effect=[bad, good])
+    provider = _bedrock_provider(client)
+
+    def validate(sql: str) -> str | None:
+        return "bad table" if "bad" in sql else None
+
+    plan = await provider.generate_sql("q", [], validate=validate)
+
+    assert plan.attempts == 2
+    assert (tally.tokens_in, tally.tokens_out) == (300, 30)
+
+
+@pytest.mark.asyncio
+async def test_bedrock_stream_records_usage_only_final_chunk():
+    tally = start_tally()
+    lines = [
+        'data: {"choices": [{"delta": {"content": "The answer is 42."}}]}',
+        'data: {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 9}}',
+        "data: [DONE]",
+    ]
+    client = MagicMock()
+    client.stream = MagicMock(return_value=_FakeSSEResponse(lines))
+    provider = _bedrock_provider(client)
+
+    deltas = [chunk async for chunk in provider.stream_answer("q", {"total": 42}, [], [])]
+
+    assert "".join(deltas) == "The answer is 42."
+    assert (tally.tokens_in, tally.tokens_out) == (5, 9)
+
+
+@pytest.mark.asyncio
+async def test_bedrock_stream_fallback_records_usage_once():
+    tally = start_tally()
+    client = MagicMock()
+    client.stream = MagicMock(side_effect=httpx.ConnectError("boom"))
+    client.post = AsyncMock(
+        return_value=_cf_response(
+            _oai_body("fallback answer", usage={"prompt_tokens": 7, "completion_tokens": 3})
+        )
+    )
+    provider = _bedrock_provider(client)
+
+    deltas = [chunk async for chunk in provider.stream_answer("q", {}, [], [])]
+
+    assert deltas == ["fallback answer"]
+    assert (tally.tokens_in, tally.tokens_out) == (7, 3)
+
+
+@pytest.mark.asyncio
+async def test_bedrock_reasoning_effort_retry_records_usage():
+    tally = start_tally()
+    bad_response = MagicMock()
+    bad_response.status_code = 400
+    bad_response.text = '{"error": {"message": "Unknown parameter: reasoning_effort"}}'
+    error = httpx.HTTPStatusError("400", request=MagicMock(), response=bad_response)
+    first = MagicMock()
+    first.raise_for_status = MagicMock(side_effect=error)
+    good = _cf_response(
+        _oai_body(
+            json.dumps({"mode": "db", "sql": "SELECT 1", "answer": ""}),
+            usage={"prompt_tokens": 11, "completion_tokens": 4},
+        )
+    )
+    client = MagicMock()
+    client.post = AsyncMock(side_effect=[first, good])
+    provider = _bedrock_provider(client)
+
+    await provider.generate_sql("q", [], validate=None)
+
+    assert (tally.tokens_in, tally.tokens_out) == (11, 4)
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_run_records_usage_into_tally():
+    tally = start_tally()
+    client = MagicMock()
+    body = {
+        "result": {
+            "response": {"mode": "db", "sql": "SELECT 1"},
+            "usage": {"prompt_tokens": 1936, "completion_tokens": 40},
+        }
+    }
+    client.post = AsyncMock(return_value=_cf_response(body))
+    provider = CloudflareProvider(_settings(llm_provider="cloudflare"), client=client)
+
+    await provider.generate_sql("total sales today", [], validate=None)
+
+    assert (tally.tokens_in, tally.tokens_out) == (1936, 40)
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_stream_records_usage_chunk():
+    tally = start_tally()
+    lines = [
+        'data: {"response": "The answer is 42."}',
+        'data: {"response": "", "usage": {"prompt_tokens": 6, "completion_tokens": 2}}',
+        "data: [DONE]",
+    ]
+    client = MagicMock()
+    client.stream = MagicMock(return_value=_FakeSSEResponse(lines))
+    provider = CloudflareProvider(_settings(llm_provider="cloudflare"), client=client)
+
+    deltas = [chunk async for chunk in provider.stream_answer("q", {"total": 42}, [], [])]
+
+    assert "".join(deltas) == "The answer is 42."
+    assert (tally.tokens_in, tally.tokens_out) == (6, 2)
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_stream_without_usage_records_nothing():
+    tally = start_tally()
+    lines = ['data: {"response": "hi"}', "data: [DONE]"]
+    client = MagicMock()
+    client.stream = MagicMock(return_value=_FakeSSEResponse(lines))
+    provider = CloudflareProvider(_settings(llm_provider="cloudflare"), client=client)
+
+    _ = [chunk async for chunk in provider.stream_answer("q", {}, [], [])]
+
+    assert (tally.tokens_in, tally.tokens_out) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_generate_sql_records_per_attempt():
+    tally = start_tally()
+    bad_response = _response(
+        [_tool_use_block("SELECT * FROM secret", block_id="tool_bad")],
+        usage=_usage(input_tokens=100, output_tokens=20),
+    )
+    good_response = _response(
+        [_tool_use_block("SELECT 1 FROM allowed", block_id="tool_good")],
+        usage=_usage(input_tokens=150, output_tokens=30),
+    )
+    client = _fake_anthropic_client([bad_response, good_response])
+    provider = AnthropicProvider(_settings(), client=client)
+
+    def validate(sql: str) -> str | None:
+        return "not allowed" if "secret" in sql else None
+
+    plan = await provider.generate_sql("q", [], validate=validate)
+
+    # Tally equals the plan's accumulated totals — recorded once per attempt.
+    assert (tally.tokens_in, tally.tokens_out) == (250, 50)
+    assert (plan.tokens_in, plan.tokens_out) == (250, 50)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_small_completion_records_usage():
+    tally = start_tally()
+    response = _response([_text_block('"What about Q2?"')], usage=_usage(30, 12))
+    client = _fake_anthropic_client([response])
+    provider = AnthropicProvider(_settings(), client=client)
+
+    await provider.rewrite_question([Turn(role="user", text="hi")], "and Q2?")
+
+    assert (tally.tokens_in, tally.tokens_out) == (30, 12)
+
+
+class _FakeAnthropicStream:
+    """Async-CM stand-in for `client.messages.stream(...)`."""
+
+    def __init__(self, texts, final=None, final_exc=None):
+        self._texts = texts
+        self._final = final
+        self._final_exc = final_exc
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    @property
+    def text_stream(self):
+        async def gen():
+            for t in self._texts:
+                yield t
+
+        return gen()
+
+    async def get_final_message(self):
+        if self._final_exc is not None:
+            raise self._final_exc
+        return self._final
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_answer_records_final_usage():
+    tally = start_tally()
+    final = SimpleNamespace(usage=_usage(input_tokens=44, output_tokens=17))
+    client = MagicMock()
+    client.messages = MagicMock()
+    client.messages.stream = MagicMock(
+        return_value=_FakeAnthropicStream(["The answer ", "is 42."], final=final)
+    )
+    provider = AnthropicProvider(_settings(), client=client)
+
+    deltas = [chunk async for chunk in provider.stream_answer("q", {}, [], [])]
+
+    assert "".join(deltas) == "The answer is 42."
+    assert (tally.tokens_in, tally.tokens_out) == (44, 17)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_final_usage_failure_does_not_raise():
+    """Usage accounting must never turn a delivered answer into an error."""
+    tally = start_tally()
+    client = MagicMock()
+    client.messages = MagicMock()
+    client.messages.stream = MagicMock(
+        return_value=_FakeAnthropicStream(["ok"], final_exc=RuntimeError("usage broke"))
+    )
+    provider = AnthropicProvider(_settings(), client=client)
+
+    deltas = [chunk async for chunk in provider.stream_answer("q", {}, [], [])]
+
+    assert deltas == ["ok"]
+    assert (tally.tokens_in, tally.tokens_out) == (0, 0)

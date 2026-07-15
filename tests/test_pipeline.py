@@ -32,6 +32,7 @@ from app.db.models import SqlAuditLog, User
 from app.domain.formatting import GREETING_REPLY
 from app.errors import RBACError
 from app.llm.base import SQLPlan
+from app.llm.usage import record_usage
 
 FIXED_VECTOR = [0.1] * 8
 SAFE_SQL = "SELECT code, name FROM distributor_t"
@@ -43,17 +44,27 @@ SAFE_SQL = "SELECT code, name FROM distributor_t"
 
 
 class FakeProvider:
-    """Minimal LLMProvider stand-in with call-tracking mocks."""
+    """Minimal LLMProvider stand-in with call-tracking mocks.
+
+    Like the real providers, `generate_sql` records its plan's token usage
+    into the per-turn tally (the pipeline reads the tally, not the plan).
+    """
 
     name = "fake"
 
     def __init__(self, plan: SQLPlan | None = None, deltas=("Here is your answer.",)):
+        self._plan = plan
         self._deltas = deltas
-        self.generate_sql = AsyncMock(return_value=plan)
+        self.generate_sql = AsyncMock(side_effect=self._generate_sql)
         self.stream_answer = MagicMock(side_effect=self._stream)
         self.rewrite_question = AsyncMock(side_effect=lambda history, q: q)
         self.generate_title = AsyncMock(return_value="Title")
         self.suggest_followups = AsyncMock(return_value=[])
+
+    async def _generate_sql(self, question, history, validate=None):
+        if self._plan is not None:
+            record_usage(self._plan.tokens_in, self._plan.tokens_out)
+        return self._plan
 
     async def _stream(self, question, facts, sample_rows, columns):
         for d in self._deltas:
@@ -297,6 +308,7 @@ async def test_miss_path_generates_executes_and_stores(session):
     assert audits[0].cache_level == "llm"
     assert audits[0].status == "ok"
     assert audits[0].tokens_in == 11
+    assert audits[0].tokens_out == 22
     assert audits[0].row_count == 1
 
 
@@ -461,6 +473,9 @@ async def test_result_cache_hit_skips_analytics(session):
     analytics.execute_readonly.assert_not_called()
     tool_res = [e for e in events if isinstance(e, ToolResult)]
     assert tool_res and tool_res[0].payload["cached"] is True
+    # An L2 hit is the deepest cache level and wins the audit's cache_level.
+    audits = await _audits(session)
+    assert audits[0].cache_level == "result"
 
 
 def test_text_delta_coerces_non_string():
@@ -593,3 +608,158 @@ async def test_suggestions_failure_never_breaks_the_answer(session):
     assert isinstance(events[-1], Done)
     audits = await _audits(session)
     assert audits[0].status == "ok"
+
+
+# --------------------------------------------------------------------------
+# Token accounting (per-turn usage tally -> sql_audit_log.tokens_in/out)
+# --------------------------------------------------------------------------
+
+
+async def test_greeting_audit_tokens_are_zero(session):
+    """Greeting rows are 'measured, zero' — 0/0, explicitly not NULL."""
+    provider = FakeProvider()
+    pipeline = _build_pipeline(provider, _query_cache(), _result_cache(), FakeAnalytics())
+    user = await _make_user(session)
+
+    await _collect(
+        pipeline, user=user, thread_id=None, question="hello", history=[], session=session
+    )
+
+    audits = await _audits(session)
+    assert audits[0].tokens_in == 0
+    assert audits[0].tokens_out == 0
+
+
+async def test_cache_hit_audit_records_answer_tokens(session):
+    """L0 hits skip SQL generation but still spend tokens on the streamed
+    answer — those must land in the audit row (previously NULL)."""
+    provider = FakeProvider()
+
+    async def _stream_with_usage(question, facts, sample_rows, columns):
+        record_usage(7, 13)
+        yield "Here is your answer."
+
+    provider.stream_answer = MagicMock(side_effect=_stream_with_usage)
+    qc = _query_cache(exact=_cache_entry())
+    analytics = FakeAnalytics(result=_query_result())
+    pipeline = _build_pipeline(provider, qc, _result_cache(), analytics)
+    user = await _make_user(session)
+
+    await _collect(
+        pipeline, user=user, thread_id=None, question="list distributors",
+        history=[], session=session,
+    )
+
+    audits = await _audits(session)
+    assert audits[0].cache_level == "L0"
+    assert audits[0].tokens_in == 7
+    assert audits[0].tokens_out == 13
+
+
+async def test_rewrite_tokens_counted(session):
+    """Tokens spent rewriting a follow-up question count toward the turn."""
+    plan = SQLPlan(sql=SAFE_SQL, mode="db", tokens_in=11, tokens_out=22)
+    provider = FakeProvider(plan=plan)
+
+    async def _rewrite(history, q):
+        record_usage(3, 4)
+        return "standalone question about distributors"
+
+    provider.rewrite_question = AsyncMock(side_effect=_rewrite)
+    qc = _query_cache()
+    analytics = FakeAnalytics(result=_query_result())
+    pipeline = _build_pipeline(provider, qc, _result_cache(), analytics)
+    user = await _make_user(session)
+
+    from app.llm.base import Turn
+
+    await _collect(
+        pipeline, user=user, thread_id=None, question="what about last month",
+        history=[Turn(role="user", text="list distributors")], session=session,
+    )
+
+    audits = await _audits(session)
+    assert audits[0].tokens_in == 11 + 3
+    assert audits[0].tokens_out == 22 + 4
+
+
+async def test_blocked_sql_audit_records_generation_tokens(session):
+    """Blocked turns still consumed LLM tokens — the audit must say so."""
+    plan = SQLPlan(sql="SELECT * FROM secret_admin_t", mode="db", tokens_in=11, tokens_out=22)
+    provider = FakeProvider(plan=plan)
+    pipeline = _build_pipeline(provider, _query_cache(), _result_cache(), FakeAnalytics())
+    user = await _make_user(session)
+
+    await _collect(
+        pipeline, user=user, thread_id=None, question="dump the admin table now",
+        history=[], session=session,
+    )
+
+    audits = await _audits(session)
+    assert audits[0].status == "blocked"
+    assert audits[0].tokens_in == 11
+    assert audits[0].tokens_out == 22
+
+
+async def test_db_error_audit_records_tokens(session):
+    plan = SQLPlan(sql=SAFE_SQL, mode="db", tokens_in=11, tokens_out=22)
+    provider = FakeProvider(plan=plan)
+    analytics = FakeAnalytics(exc=TimeoutError("query too slow"))
+    pipeline = _build_pipeline(provider, _query_cache(), _result_cache(), analytics)
+    user = await _make_user(session)
+
+    await _collect(
+        pipeline, user=user, thread_id=None, question="huge scan of everything",
+        history=[], session=session,
+    )
+
+    audits = await _audits(session)
+    assert audits[0].status == "error"
+    assert audits[0].tokens_in == 11
+    assert audits[0].tokens_out == 22
+
+
+async def test_general_mode_audit_records_tokens(session):
+    plan = SQLPlan(sql="", mode="general", answer="I help with sales.",
+                   tokens_in=9, tokens_out=5)
+    provider = FakeProvider(plan=plan)
+    pipeline = _build_pipeline(provider, _query_cache(), _result_cache(), FakeAnalytics())
+    user = await _make_user(session)
+
+    await _collect(
+        pipeline, user=user, thread_id=None, question="who are you exactly here",
+        history=[], session=session,
+    )
+
+    audits = await _audits(session)
+    assert audits[0].cache_level == "llm"
+    assert audits[0].tokens_in == 9
+    assert audits[0].tokens_out == 5
+
+
+async def test_suggestions_tokens_update_audit_row(session):
+    """Suggestions run after the audit flush; their tokens must be topped up
+    onto the SAME row (one-audit-row invariant)."""
+    plan = SQLPlan(sql=SAFE_SQL, mode="db", tokens_in=11, tokens_out=22)
+    provider = FakeProvider(plan=plan)
+
+    async def _suggest(question, columns, row_count):
+        record_usage(5, 6)
+        return ["Month wise"]
+
+    provider.suggest_followups = AsyncMock(side_effect=_suggest)
+    qc = _query_cache()
+    analytics = FakeAnalytics(result=_query_result())
+    pipeline = _build_pipeline(provider, qc, _result_cache(), analytics)
+    user = await _make_user(session)
+
+    events = await _collect(
+        pipeline, user=user, thread_id=None, question="distributor list please",
+        history=[], session=session,
+    )
+
+    assert any(isinstance(e, Suggestions) for e in events)
+    audits = await _audits(session)
+    assert len(audits) == 1
+    assert audits[0].tokens_in == 11 + 5
+    assert audits[0].tokens_out == 22 + 6

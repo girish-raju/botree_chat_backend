@@ -145,3 +145,63 @@ async def test_chat_parses_legacy_content_and_history(
     assert [t.text for t in captured["history"]] == ["first question", "an answer"]
 
     app.dependency_overrides.pop(get_pipeline, None)
+
+
+async def test_chat_accepts_top_level_id_as_thread_id(
+    app: FastAPI, client: AsyncClient, seeded_user: User
+):
+    """AI SDK v6 `useChat` sends the thread id as top-level `id`."""
+    captured = {}
+
+    class CapturingPipeline:
+        async def run(self, *, user, thread_id, question, history, session):
+            captured["thread_id"] = thread_id
+            yield TextDelta("ok")
+            yield Done()
+
+    app.dependency_overrides[get_pipeline] = lambda: CapturingPipeline()
+    token = await _token(client)
+
+    resp = await client.post(
+        "/api/chat",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "id": "t-999",
+            "messages": [{"role": "user", "content": "a question"}],
+        },
+    )
+
+    assert resp.status_code == 200
+    assert captured["thread_id"] == "t-999"
+
+    app.dependency_overrides.pop(get_pipeline, None)
+
+
+async def test_chat_threadid_takes_precedence_over_id(
+    app: FastAPI, client: AsyncClient, seeded_user: User
+):
+    captured = {}
+
+    class CapturingPipeline:
+        async def run(self, *, user, thread_id, question, history, session):
+            captured["thread_id"] = thread_id
+            yield TextDelta("ok")
+            yield Done()
+
+    app.dependency_overrides[get_pipeline] = lambda: CapturingPipeline()
+    token = await _token(client)
+
+    resp = await client.post(
+        "/api/chat",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "threadId": "t-explicit",
+            "id": "t-chat-id",
+            "messages": [{"role": "user", "content": "a question"}],
+        },
+    )
+
+    assert resp.status_code == 200
+    assert captured["thread_id"] == "t-explicit"
+
+    app.dependency_overrides.pop(get_pipeline, None)

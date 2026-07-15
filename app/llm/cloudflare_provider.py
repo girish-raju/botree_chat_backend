@@ -28,6 +28,7 @@ from app.llm.prompts import (
     render_answer_facts,
     render_sample_rows,
 )
+from app.llm.usage import record_usage, usage_from_dict
 
 _BASE_URL = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
 
@@ -140,7 +141,9 @@ class CloudflareProvider:
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise UpstreamLLMError(f"Cloudflare API request failed: {exc}") from exc
-        return response.json()
+        body = response.json()
+        record_usage(*self._extract_usage(body))
+        return body
 
     async def generate_sql(
         self,
@@ -255,6 +258,9 @@ class CloudflareProvider:
                         chunk = json.loads(data)
                     except (json.JSONDecodeError, ValueError):
                         continue
+                    usage = chunk.get("usage")
+                    if isinstance(usage, dict):
+                        record_usage(*usage_from_dict(usage))
                     delta = chunk.get("response", "")
                     if delta != "" and delta is not None:
                         got_any = True
